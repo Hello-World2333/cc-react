@@ -1,12 +1,18 @@
 --[[
   Headless test harness for cc-react compiled output.
 
-  Boots dist/main.lua against a stubbed CC environment (fake Tom's Peripherals
-  GPU with a pixel buffer) and verifies the MVP acceptance criteria:
+  Boots dist/ui.lua against a stubbed CC environment (fake Tom's Peripherals
+  GPU with a pixel buffer) and verifies the MVP acceptance criteria plus the
+  module contract:
 
     1. static page rendering — styled tree laid out and drawn to the buffer
     2. interaction + dirty-rect loop — clicks update hooks state and only the
        affected region is repainted
+    3. module shape — the compiled file returns a table with a start(side)
+       task function; the GPU side is passed explicitly
+    4. non-blocking under simpleParallel — start() runs as one task of a
+       faithful parallel.waitForAll stub alongside a second task, which also
+       receives every event (CC broadcasts to all consumers)
 
   Events are fed as a *step script*: a step is either
       { eventFn = function() return {name, ...} end }  — delivered to the
@@ -16,15 +22,19 @@
       { snapshot = function() ... end }                — runs between events,
                                                          right after the
                                                          previous render
-  The stub's os.pullEvent() throws __TEST_END__ when the script drains, which
-  unwinds the program's event loop and returns control to this script.
+  The stub's event source throws __TEST_END__ when the script drains, which
+  unwinds the UI task (or the parallel scheduler) and returns control here.
 
-  Usage: lua5.1 scripts/test_main.lua [path-to-main.lua]
+  Usage: lua5.1 scripts/test_main.lua [path-to-module.lua]
 ]]
 
-local MAIN = arg and arg[1] or "dist/main.lua"
+local MAIN = arg and arg[1] or "dist/ui.lua"
 
 local realExit = os.exit
+
+-- CC: Tweaked exposes table.unpack (Lua 5.2 compat); plain Lua 5.1 only has
+-- the global unpack, so mirror the CC environment.
+if not table.unpack then table.unpack = unpack end
 
 local VW, VH = 256, 192   -- real device: 4x3 monitor at resolution 64 → 256x192 px
 local FONT_W, FONT_H = 5, 8   -- default font is 5x8 (ascii.bin header)
@@ -46,6 +56,8 @@ local stub = {
   buf = nil,             -- buf[y][x], 0-based ARGB pixels
   synced = 0,
   calls = {},            -- recorded GPU calls (for dirty-rect assertions)
+  order = {},            -- recorded startup call order
+  wrapCalls = {},        -- peripheral.wrap sides (start(side) contract)
 }
 
 local function makeBuffer()
@@ -150,43 +162,123 @@ local fakeGpu = {
 
 -- ================= stub CC environment =================
 
-_G.arg = { "left" }
-_G.peripheral = { wrap = function() return fakeGpu end }
+_G.peripheral = {
+  wrap = function(side)
+    stub.wrapCalls[#stub.wrapCalls + 1] = side
+    return fakeGpu
+  end,
+}
 
-local function pullEvent()
+-- Main-coroutine event source: consumes one step-script entry. Runs a
+-- snapshot inline, or evaluates an eventFn and returns its tuple. Throws
+-- __TEST_END__ when the script drains.
+local function pullEventDirect()
   if #stub.steps == 0 then
     error("__TEST_END__", 0)
   end
   local step = table.remove(stub.steps, 1)
   if step.snapshot then
     step.snapshot()
-    return pullEvent()
+    return pullEventDirect()
   end
   local ev = step.eventFn()
   return ev[1], ev[2], ev[3], ev[4], ev[5], ev[6]
 end
 
+-- CC broadcasts events to every consumer. Mirror CC's parallel contract:
+-- inside a task coroutine os.pullEvent yields to the scheduler (which
+-- resumes the task with the next event); in the main coroutine it consumes
+-- the step script directly (standalone start(), or the scheduler's own pull).
+local function osPullEvent()
+  if coroutine.running() ~= nil then
+    return coroutine.yield()
+  end
+  return pullEventDirect()
+end
+
 _G.os = {
-  pullEvent = pullEvent,
+  pullEvent = osPullEvent,
   shutdown = function() end,
 }
--- CC global; the runtime no longer sleeps at startup (refreshSize is blocking),
--- but keep a stub in case any future code path calls it.
+-- CC global; the runtime no longer sleeps at startup (refreshSize is
+-- blocking), but keep a stub in case any future code path calls it.
 _G.sleep = function() end
 
--- boot the compiled program; the step script drives it until it drains
-local function boot(steps)
+-- Faithful minimal parallel.waitForAll stub (modeled on CC: Tweaked's
+-- rom/apis/parallel.lua): each task runs in a coroutine; the first resume
+-- happens with an EMPTY event (so tasks run their initial code — the UI
+-- task renders its first frame — before the first real event), then every
+-- pulled event is delivered to tasks whose filter (the value their
+-- os.pullEvent yielded) is nil or matches the event name.
+_G.parallel = {
+  waitForAll = function(...)
+    local threads = {}
+    local count = select("#", ...)
+    for i = 1, count do
+      threads[i] = { co = coroutine.create(select(i, ...)), filter = nil }
+    end
+    local event = {} -- first iteration: empty event, like real CC
+    while true do
+      local i = 1
+      while i <= count do
+        local t = threads[i]
+        local resumeWith
+        if t.filter == nil or t.filter == event[1] or event[1] == "terminate" then
+          resumeWith = event
+        end
+        if resumeWith then
+          local ok, param = coroutine.resume(t.co, table.unpack(resumeWith, 1, #resumeWith))
+          if not ok then error("parallel task failed: " .. tostring(param), 0) end
+          if coroutine.status(t.co) == "dead" then
+            table.remove(threads, i)
+            count = count - 1
+            i = i - 1
+          end
+          t.filter = param
+        end
+        i = i + 1
+      end
+      if count == 0 then return end
+      event = { pullEventDirect() }
+    end
+  end,
+}
+
+-- ================= boot =================
+
+local uiMod = nil
+
+-- Load the compiled module, then run its start() — either standalone or as
+-- one task of parallel.waitForAll (when extraTask is given). The step script
+-- drives it until it drains (the event source throws __TEST_END__).
+local function boot(steps, extraTask)
   stub.steps = steps or {}
   stub.buf = makeBuffer()
   stub.synced = 0
   stub.calls = {}
   stub.order = {}
-  local ok, err = pcall(dofile, MAIN)
-  if ok then
-    error("test harness: main.lua returned without throwing __TEST_END__")
+  stub.wrapCalls = {}
+  local ok, res = pcall(dofile, MAIN)
+  if not ok then
+    error("test harness: boot failed: " .. tostring(res))
+  end
+  if type(res) ~= "table" or type(res.start) ~= "function" then
+    error("test harness: " .. MAIN .. " does not return a module with a start() function")
+  end
+  uiMod = res
+  local run = function()
+    if extraTask then
+      _G.parallel.waitForAll(function() uiMod.start("left") end, extraTask)
+    else
+      uiMod.start("left")
+    end
+  end
+  local ok2, err = pcall(run)
+  if ok2 then
+    error("test harness: the program returned without throwing __TEST_END__")
   end
   if not tostring(err):find("__TEST_END__") then
-    error("test harness: boot failed: " .. tostring(err))
+    error("test harness: the program failed: " .. tostring(err))
   end
 end
 
@@ -219,7 +311,7 @@ end
 -- build an eventFn that clicks the button with `label` at its *current* center
 local function clickButton(label)
   return function()
-    local b = findButton(ccreact.getTree(), label)
+    local b = findButton(uiMod.getTree(), label)
     if not b then error("test harness: button '" .. label .. "' not found in tree") end
     local x, y = centerOf(b)
     return { "tm_monitor_touch", x, y, false }
@@ -259,14 +351,30 @@ end
 
 local before1, before3
 
+print("== module contract ==")
+boot({
+  {
+    snapshot = function()
+      check(type(uiMod.start) == "function" and type(uiMod.getTree) == "function",
+        "module returns a table with start() + debug hooks")
+      check(stub.wrapCalls[1] == "left",
+        "start(side) wraps the GPU on the passed side ('left')")
+      check(stub.order[1] == "refreshSize" and stub.order[2] == "setSize"
+        and stub.order[3] == "getSize",
+        "startup order refreshSize -> setSize -> getSize ("
+        .. table.concat(stub.order, " > ") .. ")")
+    end,
+  },
+})
+
 print("== single-run interaction scenario (acceptance #1 + #2) ==")
 boot({
   -- after the initial render: verify the static page
   {
     snapshot = function()
-      local tree = ccreact.getTree()
+      local tree = uiMod.getTree()
       check(tree ~= nil, "boot: root tree exists")
-      check(ccreact.getViewport() == VW and select(2, ccreact.getViewport()) == VH,
+      check(uiMod.getViewport() == VW and select(2, uiMod.getViewport()) == VH,
         "viewport is " .. VW .. "x" .. VH)
 
       local title = findText(tree, "cc-react")
@@ -297,7 +405,7 @@ boot({
   { eventFn = clickButton("+") },
   {
     snapshot = function()
-      local tree = ccreact.getTree()
+      local tree = uiMod.getTree()
       local countText = findText(tree, "Count:")
       check(countText.text == "Count: 1", "count incremented to 1 after + click")
       local last = findText(tree, "count ->")
@@ -315,7 +423,7 @@ boot({
   { eventFn = clickButton("Reset") },
   {
     snapshot = function()
-      local countText = findText(ccreact.getTree(), "Count:")
+      local countText = findText(uiMod.getTree(), "Count:")
       check(countText.text == "Count: 0", "count reset to 0 via tm_monitor_touch")
     end,
   },
@@ -327,7 +435,7 @@ boot({
   { eventFn = clickButton("+") },
   {
     snapshot = function()
-      local tree = ccreact.getTree()
+      local tree = uiMod.getTree()
       local countText = findText(tree, "Count:")
       check(countText.text == "Count: 5", "count reached 5 after repeated clicks")
       local badge = findNodes(tree, function(n) return n.text == "big number!" end)[1]
@@ -345,7 +453,7 @@ boot({
   { eventFn = clickButton("Record") },
   {
     snapshot = function()
-      local tree = ccreact.getTree()
+      local tree = uiMod.getTree()
       local recorded = findText(tree, "Recorded:")
       check(recorded ~= nil, "'Recorded:' list header present")
       local rows = findNodes(tree, function(n)
@@ -359,7 +467,7 @@ boot({
   { eventFn = clickButton("+") },
   {
     snapshot = function()
-      local tree = ccreact.getTree()
+      local tree = uiMod.getTree()
       local countText = findText(tree, "Count:")
       check(countText.text == "Count: 6", "count is 6 after one more click")
       local title = findText(tree, "cc-react")
@@ -397,7 +505,7 @@ boot({
   { eventFn = clickButton("Record") },
   {
     snapshot = function()
-      local tree = ccreact.getTree()
+      local tree = uiMod.getTree()
       local rows = findNodes(tree, function(n)
         return n.kind == "text" and n.text:sub(1, 1) == "#"
       end)
@@ -410,7 +518,7 @@ boot({
 
 print("== fresh boot starts clean ==")
 boot({})
-local countText = findText(ccreact.getTree(), "Count:")
+local countText = findText(uiMod.getTree(), "Count:")
 check(countText.text == "Count: 0", "fresh program starts at Count: 0")
 
 print("== startup order: refreshSize -> setSize -> getSize ==")
@@ -429,6 +537,51 @@ for i = 1, #stub.calls do
   end
 end
 check(found1based, "draw coords passed to GPU are 1-based (root fill at 1,1)")
+
+print("== runs as a simpleParallel task (parallel.waitForAll) ==")
+-- A second task shares the scheduler. CC broadcasts every event to all
+-- consumers, so the second task sees the same events as the UI task while
+-- the UI keeps rendering.
+local secondTaskEvents = {}
+local parallelTask = function()
+  while true do
+    local e = { os.pullEvent() }
+    secondTaskEvents[#secondTaskEvents + 1] = e[1]
+  end
+end
+
+boot({
+  -- the parallel scheduler's first resume carries an empty event, so the UI
+  -- task renders its first frame before the first real event is pulled
+  {
+    snapshot = function()
+      local tree = uiMod.getTree()
+      check(tree ~= nil, "parallel: initial frame rendered before the first event")
+      local countText = findText(tree, "Count:")
+      check(countText ~= nil and countText.text == "Count: 0", "parallel: initial count is 0")
+      check(stub.synced >= 1, "parallel: gpu.sync() called during the initial render")
+    end,
+  },
+  { eventFn = clickButton("+") },
+  {
+    snapshot = function()
+      local countText = findText(uiMod.getTree(), "Count:")
+      check(countText.text == "Count: 1", "parallel: click processed by the UI task")
+      check(#secondTaskEvents >= 1 and secondTaskEvents[1] == "tm_monitor_touch",
+        "parallel: second task received the same touch event (broadcast)")
+    end,
+  },
+  { eventFn = clickButton("Record") },
+  {
+    snapshot = function()
+      local rows = findNodes(uiMod.getTree(), function(n)
+        return n.kind == "text" and n.text:sub(1, 1) == "#"
+      end)
+      check(#rows == 1, "parallel: record processed after the + click")
+      check(#secondTaskEvents >= 2, "parallel: second task saw both events")
+    end,
+  },
+}, parallelTask)
 
 print("")
 if failures == 0 then

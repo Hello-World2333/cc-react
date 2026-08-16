@@ -5,8 +5,9 @@
  *   1. esbuild strips TypeScript types and preserves JSX (single-file apps)
  *   2. @babel/parser builds a JSX AST
  *   3. codegen.mjs lowers the AST to Lua (style-tree construction code)
- *   4. the framework runtime (runtime/runtime.lua) is embedded verbatim,
- *      producing a single self-contained main.lua
+ *   4. the framework runtime (runtime/runtime.lua) is embedded verbatim and
+ *      the chunk ends with `return ccreact` — the output is a MODULE whose
+ *      start(side) is a simpleParallel task (the main program composes it)
  *
  * Usage: node compiler/index.mjs <entry.tsx> <out.lua>
  */
@@ -65,11 +66,17 @@ const banner = [
   '  cc-react build',
   `  entry : ${entry}`,
   `  time  : ${new Date().toISOString()}`,
-  '  Deploy: copy this file into a CC: Tweaked computer and run `lua main.lua [gpuSide]`.',
+  '  This file is a MODULE, not a standalone program. Deploy it into a CC:',
+  '  Tweaked computer (e.g. as ui.lua) and drive it from your main program:',
+  '    local simpleParallel = require("lib.simpleParallel")',
+  '    local ui = require("ui")',
+  '    simpleParallel.add(function() ui.start("left") end)   -- GPU side',
+  '    simpleParallel.start()                                -- + network tasks',
   ']]',
 ].join('\n');
 
-const output = `${banner}\n\n${runtime}\n\n-- ===== compiled from ${entry} =====\n\n${compiled}\n`;
+const output = `${banner}\n\n${runtime}\n\n-- ===== compiled from ${entry} =====\n\n${compiled}\n\n`
+  + `-- ===== module interface (simpleParallel task + debug hooks) =====\nreturn ccreact\n`;
 fs.mkdirSync(path.dirname(outFile), { recursive: true });
 fs.writeFileSync(outFile, output);
 console.log(`compiled ${entry} -> ${outFile} (${output.length} bytes)`);

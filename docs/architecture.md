@@ -50,7 +50,9 @@ Lua 框架运行时（不可静态化的三块）：
 Tom's Peripherals GPU（像素 framebuffer）
 ```
 
-产物形态：MVP 为**单文件**（框架运行时内嵌，一个 `main.lua` 拷进电脑即可运行），后续拆分为多模块 `require`。
+产物形态：MVP 之后为**模块**（框架运行时内嵌在模块文件里，`dist/ui.lua`），由主程序
+`require` 后经 simpleParallel（`parallel.waitForAll` 封装）调度：`simpleParallel.add(function() ui.start(side) end)`，
+与未来的网络任务并发运行；多文件 `import`（TSX 拆多个模块）仍属后续里程碑。
 
 ## 4. 决策汇总
 
@@ -161,9 +163,9 @@ MVP 之外的后续里程碑（按优先级建议）：
 
 1. 键盘输入 + 焦点管理
 2. 动态列表（keyed diff）
-3. 网络接入（async 状态机编译）
+3. 网络接入（async 状态机编译；任务侧已就绪 —— 模块的 `start(side)` 可直接与网络栈任务并行）
 4. 动画（声明式 transition）
-5. 产物拆分多模块
+5. 多文件 import（TSX 拆多个模块；产物已模块化，运行时仍内嵌）
 6. 自定义字体 / 中文
 
 ## 15. 待决问题
@@ -178,8 +180,16 @@ MVP 之外的后续里程碑（按优先级建议）：
 MVP 已按本文档落地，代码布局见仓库根目录 README。与本文档的对照与偏差：
 
 - **编译管线**（§5 起步路径）：`esbuild` 擦类型（`jsx: preserve`）→ `@babel/parser` AST →
-  自研 codegen 生成 Lua；产物为单文件 `dist/main.lua`（框架运行时内嵌）。`tsc --noEmit` 已接入
-  （`npm run typecheck`）。
+  自研 codegen 生成 Lua；产物为模块 `dist/ui.lua`（框架运行时内嵌，尾部 `return ccreact`）。
+  `tsc --noEmit` 已接入（`npm run typecheck`）。
+- **产物形态（2025-08 模块化）**：编译产物不再是独立程序。顶层 `render(<App/>)` 编译为
+  `__mount(render_App)`（只登记根组件，require 时不碰 GPU）；模块返回的表含 `start(side)` 任务函数
+  —— GPU 初始化（阻塞 `refreshSize`，side 由主程序显式传入，默认 `left`）+ 首帧渲染 + `os.pullEvent`
+  事件循环。主程序经 simpleParallel 组合：`simpleParallel.add(function() ui.start("left") end)` +
+  网络任务 + `simpleParallel.start()`。CC 的 `parallel.waitForAll` 首轮以空事件 resume 每个任务
+  （首帧在首个事件前渲染），随后每个事件广播给所有消费者（无争抢），UI 任务在 `os.pullEvent`
+  处让出调度器，因此与网络栈任务并发、互不阻塞。测试桩按真机 `parallel.lua` 语义复刻了该调度
+  （`scripts/test_main.lua` 的 parallel stub + 双任务广播断言）。
 - **组件模型**（§6）：`useState` / `useEffect` 编译到运行时 `__useState` / `__useEffect`；
   状态按「组件实例 DFS 路径 + hook 索引」存放，组件 fnId 变更时重置槽位（无 key 的 MVP 身份模型）。
   更新粒度 = 整树重跑 + 布局结果对比（§6 一致）。
@@ -205,7 +215,8 @@ MVP 已按本文档落地，代码布局见仓库根目录 README。与本文档
   脏矩形各向外扩 2px 以覆盖字形越界残留。
 - **与文档的偏差**：
   - 组件对外命名为 `Box / Panel / Text / Button`（§10 大写命名），编译器同时接受小写别名。
-  - 编译入口为顶层 `render(<App/>)`，**仅支持单文件应用**（多文件 import 未做）。
+  - 编译入口为顶层 `render(<App/>)`（挂载根组件；产物是模块，运行时由 `start(side)` 启动），
+    **仅支持单文件模块**（多文件 import 未做）。
   - 三元表达式降级为 Lua `and/or`，要求真值分支为真值（元素/数字/字符串），文档化限制。
   - 无滚动/裁剪；内容溢出视口不绘制也不可点击。
 - **工具链**（§13）：部署仍由开发者自行 SFTP，工具链不负责。

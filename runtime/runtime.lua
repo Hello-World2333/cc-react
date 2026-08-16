@@ -1,5 +1,5 @@
 --[[
-  cc-react framework runtime (embedded into every compiled program).
+  cc-react framework runtime (embedded into every compiled UI *module*).
 
   The compiled .tsx program produces a *style tree* (nodes built by the
   __box / __text / __panel / __button factories). This runtime:
@@ -7,6 +7,26 @@
     2. flexbox layout engine  (measure + place, text sized via gpu.getTextLength)
     3. dirty-rect renderer    (compare old/new layout trees, repaint only changes)
     4. event routing          (tm_monitor_touch / tm_monitor_mouse_* hit-testing)
+
+  Entry model — the compiled output is a MODULE, not a standalone program:
+    - at load time the top-level render(<App/>) only *mounts* the root
+      component (__mount); no GPU work happens on require
+    - the module returns a table whose `start(side)` is a blocking *task
+      function* for simpleParallel (parallel.waitForAll): it initializes the
+      GPU (blocking refreshSize), renders the first frame, then loops on
+      os.pullEvent + dirty-rect repaint. The main program composes it with the
+      network stack tasks, e.g.:
+
+          local simpleParallel = require("lib.simpleParallel")
+          local ui = require("ui")
+          simpleParallel.add(function() ui.start("left") end)
+          -- future: simpleParallel.add(networkTask)
+          simpleParallel.start()
+
+      CC's parallel scheduler first resumes every task with an empty event, so
+      the initial frame renders before the first real event; afterwards every
+      event is broadcast to all unfiltered consumers, so the UI loop sees the
+      events it needs while the other tasks run concurrently.
 
   Coordinate convention: the framebuffer is 1-based (1..widthPx / 1..heightPx),
   matching tm_monitor_touch / tm_monitor_mouse_click pixel coordinates. The GPU
@@ -32,12 +52,10 @@ local __viewportW, __viewportH = 0, 0
 -- 0. GPU adapter
 -- ============================================================
 
-local GPU_SIDE = arg and arg[1] or "left"
-local gpu = peripheral.wrap(GPU_SIDE)
-if not gpu then
-  error("cc-react: no GPU peripheral found on side '" .. tostring(GPU_SIDE)
-    .. "' (usage: lua main.lua <side>)", 0)
-end
+-- GPU is resolved inside start(side), NOT at module load: the module is
+-- require'd by a main program, which passes the GPU side explicitly
+-- (ui.start("left")); the module never touches the shell's `arg` global.
+local gpu
 
 -- Coordinate convention: the GPU API is 1-based (verified against the mod's
 -- bytecode: filledRectangle/drawText subtract 1 internally and throw
@@ -132,7 +150,15 @@ end
 --   2. setSize(64)    — apply the resolution multiplier
 --   3. getSize()      — read the final pixel viewport
 -- No polling: dynamic re-detection while running is out of scope for the MVP.
-local function __gpuReady()
+-- Runs inside start(side): the side comes from the main program, defaulting
+-- to "left" so `simpleParallel.add(ui.start)` works for the common layout.
+local function __gpuReady(side)
+  local s = side or "left"
+  gpu = peripheral.wrap(s)
+  if not gpu then
+    error("cc-react: no GPU peripheral found on side '" .. tostring(s)
+      .. "' (pass the side to ui.start(side))", 0)
+  end
   __gpu.refreshSize()
   __gpu.setSize(RESOLUTION)
   local w, h = __gpu.getSize()
@@ -803,9 +829,26 @@ local function __drain()
   end
 end
 
-local function __run(rootFn)
+-- ============================================================
+-- 7. Module entry (mount + task)
+-- ============================================================
+
+-- Register the root component. Compiled from the top-level render(<App/>);
+-- only records the function — no GPU work happens at module load.
+local function __mount(rootFn)
   __rootFn = rootFn
-  local w, h = __gpuReady()
+end
+
+-- The UI task body. This is the function a main program hands to
+-- simpleParallel (parallel.waitForAll), so the UI loop runs concurrently
+-- with the rest of the program (future network stack tasks). CC broadcasts
+-- every event to all consumers, so this loop sees all events and filters
+-- its own (tm_monitor_*). Initialization is done here, not at load time.
+local function __start(side)
+  if __rootFn == nil then
+    error("cc-react: no component mounted — the module needs render(<App/>) at top level", 0)
+  end
+  local w, h = __gpuReady(side)
   __viewportW, __viewportH = w, h
   __render()
   __drain()
@@ -817,8 +860,14 @@ local function __run(rootFn)
   end
 end
 
--- Debug/test hook (used by the headless test harness).
+-- Module interface + debug/test hooks. The compiled module returns this
+-- table (see the `return ccreact` epilogue appended by the compiler); the
+-- headless test harness drives it through start() and inspects the tree.
 ccreact = {
+  -- entry points
+  start = function(side) return __start(side) end,
+  mount = function(rootFn) __mount(rootFn) end,
+  -- debug / test hooks
   getTree = function() return __lastTree end,
   getViewport = function() return __viewportW, __viewportH end,
   isPressed = function() return __pressedPath end,

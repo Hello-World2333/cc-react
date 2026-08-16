@@ -6,6 +6,7 @@
 架构设计见 [docs/architecture.md](docs/architecture.md)，Tom's Peripherals GPU 的 API 契约（坐标/颜色/
 字体度量/启动顺序等，经 1.3.1 字节码验证）见 [docs/toms-gpu-api.md](docs/toms-gpu-api.md)。
 **当前状态：MVP 已实现**，满足 §14 两条验收标准：静态页面渲染 + 交互/脏矩形重绘闭环。
+编译产物为**模块**（`start(side)` 任务函数），由主程序经 simpleParallel 非阻塞调度（为未来网络功能兼容）。
 
 ## 目录
 
@@ -14,32 +15,58 @@ compiler/          JSX → Lua 编译器（esbuild 擦类型 → @babel/parser A
 runtime/           框架运行时（hooks 状态槽、flexbox 布局、脏矩形渲染、事件路由、GPU 适配）
 framework/         全局 TS 类型声明（useState/useEffect/render 与 JSX 组件类型）
 demo/App.tsx       MVP 演示应用（计数器 + 条件徽章 + 动态列表）
-scripts/           无头测试（stub GPU + CC 环境，跑通验收标准）
-dist/main.lua      编译产物（单文件，拷进电脑即可运行）
+demo/main.lua      演示主程序（require 编译产物，经 simpleParallel 非阻塞调度 UI 任务）
+scripts/           无头测试（stub GPU + CC 环境，跑通验收标准 + 模块/并行契约）
+dist/ui.lua        编译产物（模块：require 后由主程序组合调度，拷进电脑即可用）
 ```
 
 ## 快速开始
 
 ```bash
 npm install        # esbuild + @babel/parser + typescript
-npm run build      # demo/App.tsx -> dist/main.lua
-npm run test       # luac 语法检查 + 无头测试（stub GPU）
+npm run build      # demo/App.tsx -> dist/ui.lua（模块形态）
+npm run test       # luac 语法检查 + 无头测试（stub GPU + 并行调度）
 npm run test:all   # typecheck + build + test
 ```
 
 ## 部署
 
-把 `dist/main.lua` 通过 SFTP 拷进游戏存档的电脑目录（`saves/<存档>/computers/<id>/`），
+编译产物是**模块**而非独立程序：它导出 `start(side)` 任务函数，由主程序通过
+[simpleParallel](https://tweaked.cc/module/parallel.html)（`parallel.waitForAll` 封装）调度，
+从而与未来的网络任务（`docs/lib/` 网络栈）并发运行。把下列文件通过 SFTP 拷进游戏存档的
+电脑目录（`saves/<存档>/computers/<id>/`）：
+
+```
+ui.lua      ← dist/ui.lua           编译产物
+main.lua    ← demo/main.lua         主程序（或自己写）
+lib/        ← simpleParallel.lua + 网络栈（docs/lib；simpleParallel 来自网络栈 lib）
+```
+
 然后在游戏内运行：
 
 ```
 lua main.lua left
 ```
 
-`left` 是 GPU 外设所在的 side（默认 `left`）。屏幕至少需要 **3 块横向拼接的显示器**
+`left` 是 GPU 外设所在的 side（默认 `left`）。主程序里就是简单的任务组合：
+
+```lua
+local simpleParallel = require("lib.simpleParallel")
+local ui = require("ui")
+simpleParallel.add(function() ui.start("left") end)   -- UI 任务
+-- 未来：simpleParallel.add(networkTask)              -- 网络任务
+simpleParallel.start()
+```
+
+UI 任务在 `os.pullEvent` 处让出调度器，因此 UI 渲染不阻塞其他任务；CC 会把每个事件
+广播给所有消费者（无争抢），`simpleParallel.start()` 首次会以空事件启动每个任务，
+所以首帧在第一个事件到来前就已渲染。屏幕至少需要 **3 块横向拼接的显示器**
 （192px 宽；示例的完整界面在 3×4 = 192×256 上最佳，基础界面在 3×2 上即可）。
 
 ## 写一个应用
+
+作者模型不变：`.tsx` 里定义组件，`render(<App/>)` 挂载根组件；编译产物是模块，
+GPU 初始化与事件循环都在 `start(side)` 里（由主程序经 simpleParallel 调用）。
 
 ```tsx
 function App() {
@@ -74,7 +101,8 @@ render(<App />);
 - 颜色：`#rgb` / `#rrggbb` / `#aarrggbb`，编译期转 ARGB
 - 事件：`tm_monitor_touch`（普通屏点击）与 `tm_monitor_mouse_click/up`（Bitmap 屏，含按下视觉反馈）
 - JSX 表达式：三元（真值分支）、`&&` / `||`、`.map()`（→ 运行时 `__map`）、数组展开（→ `__arr`）、模板/拼接文本
-- 单文件应用：组件必须与 `render(<App/>)` 在同一个 `.tsx` 里（多文件 import 与 keyed list 是后续里程碑）
+- 单文件模块：组件必须与 `render(<App/>)` 在同一个 `.tsx` 里（多文件 import 与 keyed list 是后续里程碑）；
+  编译产物是模块，`start(side)` 作为 simpleParallel 任务被主程序调度（见「部署」）
 
 ## 故障排查：真机黑屏（已修复 2025-08）
 

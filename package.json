@@ -2,12 +2,12 @@
   "name": "cc-react",
   "version": "0.1.0",
   "private": true,
-  "description": "React-style UI framework for CC: Tweaked + Tom's Peripherals GPU. Compiles .tsx to a single Lua program.",
+  "description": "React-style UI framework for CC: Tweaked + Tom's Peripherals GPU. Compiles .tsx to a Lua module whose start(side) runs as a simpleParallel task.",
   "type": "module",
   "scripts": {
-    "build": "node compiler/index.mjs demo/App.tsx dist/main.lua",
+    "build": "node compiler/index.mjs demo/App.tsx dist/ui.lua",
     "typecheck": "tsc --noEmit",
-    "test": "luac5.1 -p dist/main.lua && lua5.1 scripts/test_main.lua",
+    "test": "luac5.1 -p dist/ui.lua && lua5.1 scripts/test_main.lua",
     "test:all": "npm run typecheck && npm run build && npm run test"
   },
   "dependencies": {

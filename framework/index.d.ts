@@ -3,8 +3,14 @@
  *
  * The framework is NOT imported: `useState` / `useEffect` / `render` and the
  * Box / Panel / Text / Button components are globals provided by the Lua
- * runtime embedded in the compiled program. The compiler maps these names
+ * runtime embedded in the compiled module. The compiler maps these names
  * onto the runtime's hook/entry machinery and node factories.
+ *
+ * The compiled output is a MODULE: the top-level `render(<App/>)` only mounts
+ * the root component (__mount); the module returns a table whose `start(side)`
+ * is a simpleParallel task — the main program composes it, e.g.
+ * `simpleParallel.add(function() ui.start("left") end)`, so the UI loop runs
+ * non-blockingly alongside future network tasks.
  *
  * `React` is declared only so TS's classic JSX mode type-checks capitalized
  * tags (`<Panel/>` → React.createElement(Panel, ...)); it never reaches the

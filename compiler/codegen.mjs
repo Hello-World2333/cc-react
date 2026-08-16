@@ -115,6 +115,7 @@ export class Codegen {
   /** @param {string[]} components top-level component function names (contain JSX) */
   constructor(components) {
     this.components = new Set(components);
+    this.sawRender = false;
   }
 
   // ----------------------------------------------------------------
@@ -125,6 +126,10 @@ export class Codegen {
     const out = [];
     for (const stmt of ast.program.body) {
       this.genTopLevel(stmt, out);
+    }
+    if (!this.sawRender) {
+      throw new CodegenError(
+        'the compiled module needs a top-level render(<App/>) call (it mounts the root component)');
     }
     return out.join('\n');
   }
@@ -191,7 +196,10 @@ export class Codegen {
           if (!this.components.has(tag)) {
             throw new CodegenError(`render(<${tag}/>) but ${tag} is not a component function`);
           }
-          out.push(`__run(render_${tag})`);
+          // Mounts the root component; the compiled module's start(side) task
+          // (returned as the module table) does the GPU init + render loop.
+          this.sawRender = true;
+          out.push(`__mount(render_${tag})`);
           return;
         }
         out.push(this.genExpr(expr));
