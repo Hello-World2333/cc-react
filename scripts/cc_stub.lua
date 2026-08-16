@@ -208,6 +208,24 @@ local function osPullEvent()
   return pullEventDirect()
 end
 
+-- Real CC: Tweaked's os.queueEvent cannot carry function values — args are
+-- converted through the event queue and functions arrive as nil (verified on
+-- a real device; tables survive with their function fields dropped). Mirror
+-- that here so tests catch anything relying on functions crossing events
+-- (e.g. the network bridge must store responses in a shared table and send
+-- only the primitive job id, never the response itself).
+local function sanitizeEventArg(v, depth)
+  if type(v) == "function" then return nil end
+  if type(v) == "table" and depth < 8 then
+    local out = {}
+    for k, val in pairs(v) do
+      out[k] = sanitizeEventArg(val, depth + 1)
+    end
+    return out
+  end
+  return v
+end
+
 _G.os = {
   pullEvent = osPullEvent,
   shutdown = function() end,
@@ -218,7 +236,12 @@ _G.os = {
   -- the network bridge (fetch) signals the worker task and reports results
   -- through queued events; pullEventDirect drains them before the step script
   queueEvent = function(name, ...)
-    t.stub.queue[#t.stub.queue + 1] = { name, ... }
+    local n = select("#", ...)
+    local ev = { name }
+    for i = 1, n do
+      ev[i + 1] = sanitizeEventArg(select(i, ...), 0)
+    end
+    t.stub.queue[#t.stub.queue + 1] = ev
   end,
 }
 -- CC global; the runtime no longer sleeps at startup (refreshSize is

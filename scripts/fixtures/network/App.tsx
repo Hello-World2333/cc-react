@@ -31,7 +31,10 @@ function NetworkDemo() {
   async function loadBoth() {
     setStatus('start');
     const r1 = await fetch(URL_ONE);
-    setA(r1.ok ? (r1.body || '') : 'ERR:' + r1.error);
+    // json() is a METHOD closure on the docs/lib response — it must survive
+    // the worker → event → UI round trip (the runtime stores the response in
+    // a shared table; CC events can't carry function values).
+    setA(r1.ok ? (r1.json() || '') : 'ERR:' + r1.error);
     const r2 = await fetch(URL_TWO);
     setB(r2.ok ? (r2.body || '') : 'ERR:' + r2.error);
     setStatus('done');

@@ -834,6 +834,12 @@ local __netSeq = 0
 local __netClient = nil   -- docs/lib HTTP client (set by the main program)
 local __netBackend = nil  -- test hook: replaces the real HTTP client
 local __netDeferred = {}  -- id -> job whose backend asked to defer
+-- id -> response table. CC: Tweaked's os.queueEvent CANNOT carry function
+-- values (verified on a real device: they arrive as nil), and docs/lib
+-- responses carry methods (json/text are closures) — so the response NEVER
+-- crosses an event. The worker stores it here and the completion event
+-- carries only the primitive job id; the UI reads the table back directly.
+local __netResults = {}
 
 local function __fetch(url, options)
   __netSeq = __netSeq + 1
@@ -874,23 +880,27 @@ local function __netFetchOne(job)
   return __netClient:fetch(job.url, job.options)
 end
 
+-- Finish a fetch job: normalize errors to a failed response, store the
+-- response in __netResults (the response NEVER crosses an event — CC event
+-- args cannot carry function values, and responses carry methods), then wake
+-- the UI with an event carrying only the primitive job id.
+local function __netFinish(id, resp, err)
+  if err ~= nil then resp = { ok = false, error = err } end
+  if resp == nil then resp = { ok = false, error = "empty response" } end
+  __netResults[id] = resp
+  if os.queueEvent then os.queueEvent("ccreact_net_done", id) end
+end
+
 -- The network worker task body. It drains the job queue on every wake-up,
 -- then waits for any event (an event can be missed while a blocking fetch is
--- in flight — the drain loop catches up when it returns). The completion
--- event always carries a response TABLE (errors are normalized to a failed
--- response) — a nil payload arg would create a hole in the event table and
--- later args would be lost when the scheduler unpacks it.
+-- in flight — the drain loop catches up when it returns).
 local function __networkLoop()
   while true do
     while #__netJobs > 0 do
       local job = table.remove(__netJobs, 1)
       local resp, err = __netFetchOne(job) -- may yield; never wrapped in pcall
-      if resp == false then
-        -- deferred: resolved later via resolveNetworkJob
-      elseif os.queueEvent then
-        if err ~= nil then resp = { ok = false, error = err } end
-        if resp == nil then resp = { ok = false, error = "empty response" } end
-        os.queueEvent("ccreact_net_done", job.id, resp)
+      if resp ~= false then
+        __netFinish(job.id, resp, err)
       end
     end
     os.pullEvent()
@@ -901,11 +911,7 @@ end
 local function __netResolveDeferred(id, resp, err)
   if __netDeferred[id] == nil then return end
   __netDeferred[id] = nil
-  if os.queueEvent then
-    if err ~= nil then resp = { ok = false, error = err } end
-    if resp == nil then resp = { ok = false, error = "empty response" } end
-    os.queueEvent("ccreact_net_done", id, resp)
-  end
+  __netFinish(id, resp, err)
 end
 
 -- Deferred jobs in id order (test harness: find the job to resolve).
@@ -1768,13 +1774,15 @@ local function __handleEvent(e)
       if node then __inputInsert(node, content) end
     end
   elseif name == "ccreact_net_done" then
-    -- (id, resp) — a fetch worker finished a job: resolve the pending future
-    -- so the await continuation (and useRequest) can run. The worker already
-    -- normalized errors to a failed response ({ ok = false, error = msg }).
-    local id, resp = e[2], e[3]
+    -- (id) — a fetch worker finished a job. The response lives in
+    -- __netResults (CC events can't carry function values, and responses
+    -- carry methods); only the primitive id crosses the event.
+    local id = e[2]
     local f = __netPending[id]
     if f then
       __netPending[id] = nil
+      local resp = __netResults[id]
+      __netResults[id] = nil
       __resolveFuture(f, resp)
     end
   elseif name == "timer" then

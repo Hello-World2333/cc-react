@@ -42,7 +42,11 @@ local clickButton = t.clickButton
 t.MAIN = arg and arg[1] or "dist/fixture-network.lua"
 
 local function okResp(body)
-  return { ok = true, status = 200, statusText = "OK", body = body }
+  local resp = { ok = true, status = 200, statusText = "OK", body = body }
+  -- a method closure, like docs/lib http's resp:json() — must survive the
+  -- worker → event → UI round trip (CC events can't carry function values)
+  function resp:json() return body end
+  return resp
 end
 
 -- ================= scenario 1: sequential awaits =================

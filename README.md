@@ -304,5 +304,9 @@ JSON body 用 `resp.json()`。
   - `fetch` 需要主程序构建 docs/lib HTTP client 并传入（`ui.setHttpClient(client)`）；
     worker 已内置于 `ui.start()`（无需额外注册任务）。未传入时 fetch 解析为
     `{ ok = false, error = "http client not set: ..." }`。
+  - CC 的 `os.queueEvent` 事件参数**携带 function 会变 nil**（真机实测，表内嵌套的函数字段
+    同样被丢弃）：fetch 的响应表不经过事件传输（运行时按 job id 存共享表，事件只带 id），
+    因此响应上的 `json()` / `text()` 方法可用；自己给 `os.queueEvent` 传含函数的值会踩同样
+    的坑。
   - 网络栈（`docs/lib`）的 IP/ARP/DNS 任务必须在 `simpleParallel.start()` 前构造
     （主程序构建 client 时即完成）；`fetch` 只支持 `http://`（docs/lib 现状）。

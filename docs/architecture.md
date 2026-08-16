@@ -313,10 +313,13 @@ MVP 已按本文档落地，代码布局见仓库根目录 README。与本文档
     任务** `simpleParallel.add(function() ui.start(side) end)` 即可同时跑 UI 与 fetch worker；
     模块仍导出 `networkLoop()` 供高级组合（如脱离 `start` 单独调度），但不应与 `start` 同时添加。
     worker 阻塞式调用 `docs/lib` 的 HTTP client（在 simpleParallel 协程内可安全 sleep/收包），
-    完成后 `os.queueEvent("ccreact_net_done", id, resp)`；UI 事件循环收到后解析 future，续体运行
-    （状态更新走正常脏矩形重绘）。作业队列每唤醒必排空，worker 在阻塞 fetch 期间错过唤醒事件也
-    不会丢作业。错误（连接失败/DNS/未配置）统一归一化为 `{ ok = false, error = msg }` 响应表，
-    事件载荷**绝不携带 nil 参数**（nil 会在事件表里留空洞，调度器 unpack 会丢后续参数）。
+    完成后**把响应存进运行时共享表（`__netResults[id]`），事件只携带 job id**
+    （`os.queueEvent("ccreact_net_done", id)`）；UI 事件循环按 id 取回响应并解析 future，续体运行
+    （状态更新走正常脏矩形重绘）。响应表**绝不经过事件传输**：CC: Tweaked 的 `os.queueEvent`
+    事件参数携带 function 会变 nil（真机实测，表内嵌套的函数字段同样被丢弃），而 docs/lib 响应
+    自带 `json()`/`text()` 闭包方法——经事件传输会丢方法（真机表现为 `attempt to call field
+    'json' (a nil value)`）。作业队列每唤醒必排空，worker 在阻塞 fetch 期间错过唤醒事件也不会丢
+    作业。错误（连接失败/DNS/未配置）统一归一化为 `{ ok = false, error = msg }` 响应表。
   - **网络客户端注入**：**HTTP client 实例由主程序构建并传入**（框架不拼 IP 栈——网络配置属于
     部署环境）。主程序在 `simpleParallel.start()` **之前**用 `docs/lib` 构建 client
     （`IP.new({ mode="host", interfaces = {...} })` → `HTTP.newClient(ipIface, { dnsServer, timeout })`），
@@ -328,10 +331,12 @@ MVP 已按本文档落地，代码布局见仓库根目录 README。与本文档
     四槽位：挂载与 deps 变化时触发请求；`refetch()` 立即重发；token 机制丢弃过期响应（新请求已
     发起时旧续体直接返回，不会用旧数据覆盖新数据）。返回 `{ data, loading, error, refetch }`。
   - **验证**：新增 `scripts/fixtures/network/`（顺序 await 值流、错误路径、await 非 future、
-    useRequest 挂载/加载/refetch/过期保护/无关重渲染不重发）与 `scripts/test_network.lua`
-    （无头测试：`ui.start` 内部组合的 worker + `ui.setNetworkBackend` 桩后端 +
-    `getNetworkJobs`/`resolveNetworkJob` 手动喂响应）。`cc_stub.lua` 增加 `os.queueEvent`
-    与队列优先排空（先于 step 脚本），模拟真实 CC 的「排队事件广播给所有消费者」；
+    useRequest 挂载/加载/refetch/过期保护/无关重渲染不重发；`r1.json()` 断言响应上的方法闭包
+    完整穿过 worker→事件→UI 全程）与 `scripts/test_network.lua`（无头测试：`ui.start` 内部
+    组合的 worker + `ui.setNetworkBackend` 桩后端 + `getNetworkJobs`/`resolveNetworkJob`
+    手动喂响应）。`cc_stub.lua` 增加 `os.queueEvent` 与队列优先排空（先于 step 脚本），模拟
+    真实 CC 的「排队事件广播给所有消费者」，并**复刻真机行为：事件参数里的 function 一律变
+    nil**（含表内嵌套），回归测试能抓住「响应经事件传输丢方法」这类 bug；
     `parallel.waitForAll` 桩改用 `osPullEvent` 取事件（可重入，支持 `start` 内的嵌套 parallel）。
   - **与文档的偏差**：`fetch`/`useRequest` 是全局（`MAPPED_FUNCS` 映射到运行时），TS 类型层
     `Future<T>` 以 `PromiseLike<T>` 呈现以便 `await` 解包类型。async 组件（含 JSX 的 async 函数）
