@@ -176,7 +176,8 @@ Enter 257 / Tab 258 / Backspace 259 / Delete 261 / Left 263 / Right 262 / Home 2
 - 键盘输入 + 焦点管理（里程碑 1）：`<Input>` 文本框 —— 受控 `value` + `onChange`（app 持有文本）、
   `placeholder` 占位、内置编辑（字符插入/删除、Backspace/Delete、方向键/Home/End、Enter 触发 `onSubmit`、
   `tm_keyboard_paste` 粘贴）、点击聚焦并把光标定位到点击处、Tab/Shift+Tab 在输入框间循环焦点、
-  点击空白失焦、焦点边框 + 闪烁光标（`os.startTimer` 驱动）；键盘事件走 Tom's Peripherals 的
+  点击空白失焦、焦点边框 + 闪烁光标（`os.startTimer` 驱动）；长文本**裁剪到内容盒并随光标
+  自动水平滚动**（真实输入框行为）；键盘事件走 Tom's Peripherals 的
   `tm_keyboard_key` / `tm_keyboard_key_up` / `tm_keyboard_char` / `tm_keyboard_paste`
 - 滚动：`<Scroll>` 容器 —— 内容按完整尺寸布局、视口裁剪（不越界绘制），
   滚轮（`tm_monitor_mouse_scroll`，方向语义与真机一致：向下滚动 dir=+1）与触摸拖拽滚动；
@@ -223,9 +224,9 @@ Enter 257 / Tab 258 / Backspace 259 / Delete 261 / Left 263 / Right 262 / Home 2
 - `useState` 状态按「组件实例 DFS 路径」存放；结构静态时稳定，条件渲染换组件会重置对应槽位（keyed list 里程碑解决）。
 - `Input` 的 `value` 是受控的（app 通过 `onChange` 更新）；宽度默认跟随内容
   （value/placeholder 的测量宽度），值变化会改变盒子大小 —— 需要稳定宽度时显式设置 `width`。
-- `Input` 的文本**不裁剪**：固定宽度下文本（和光标）会画到盒子右缘之外；脏矩形按「盒子 ∪
-  文本实际绘制范围」计算，因此缩短文本/移动光标不会在盒子外留下残影（字形逐像素越界仍由
-  `DIRTY_PAD` 覆盖）。想让超长文本隐藏的话需自行把输入框放进 `<Scroll>` 之类裁剪容器。
+- `Input` 对长文本做**真实输入框式处理**：文本被裁剪到内容盒内（不越界绘制），视图随光标
+  水平滚动 —— 输入到末尾时文本左移、Home/左移逐步回滚、Backspace 保持文本尾随光标；
+  点击映射会按滚动偏移定位到可见字符。光标由 `__layoutInputOffset` 保持在内容盒内。
 - 光标闪烁由 `os.startTimer(0.5)` 驱动：输入框聚焦时每 0.5s 产生一次极小脏矩形重绘；
   按键/点击会重置闪烁并重新计时。对性能敏感的场景可在 `onChange` 中自行管理。
 - 键盘事件只走 Tom's Peripherals 前缀形态（`tm_keyboard_*`，`fireNativeEvents` 默认 false）；

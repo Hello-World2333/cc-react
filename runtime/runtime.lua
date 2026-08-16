@@ -150,14 +150,10 @@ function __gpu.rectangle(x, y, w, h, c, clip)
   gpu.rectangle(x1, y1, x2 - x1 + 1, y2 - y1 + 1, __color(c))
 end
 function __gpu.drawText(x, y, t, fg, bg, size, pad, clip)
-  -- Skip entirely if the text would extend past the screen edge (drawText
-  -- throws "Out of boundary" instead of clipping).
-  if x < 1 or y < 1 then return end
   local fs = size or 1
   local tp = pad or 1 -- the mod's default padding (1px between characters)
   local tw = gpu.getTextLength(t, fs, tp)
   local th = FONT_H * fs -- glyph height = fontHeight(8) x size; padding does not affect height
-  if x + tw - 1 > __viewportW or y + th - 1 > __viewportH then return end
   -- drawText requires explicit Numbers for fg/bg (nil → "Bad argument #5:
   -- (expected Number)"). -1 is the mod's "no background" sentinel; colors
   -- must be signed int32 because the mod converts them via a saturating
@@ -168,6 +164,9 @@ function __gpu.drawText(x, y, t, fg, bg, size, pad, clip)
     -- A glyph row cannot be clipped part-way (drawText paints whole glyphs):
     -- the row must fit vertically inside the clip. Horizontally we split the
     -- string into the visible char span (per-char advance via getTextLength).
+    -- The clip is inside the viewport (callers clamp via __clipIntersect), so
+    -- scrolled content may start at a negative x — the sub-range always draws
+    -- from clip.x onward and never reaches the screen edge.
     if y < clip.y or y + th - 1 > clip.y + clip.h - 1 then return end
     if x >= clip.x and x + tw - 1 <= clip.x + clip.w - 1 then
       gpu.drawText(x, y, t, fg2, bg2, fs, tp)
@@ -192,6 +191,10 @@ function __gpu.drawText(x, y, t, fg, bg, size, pad, clip)
     gpu.drawText(x + off, y, t:sub(a, b), fg2, bg2, fs, tp)
     return
   end
+  -- No clip: skip entirely if the text would extend past the screen edge
+  -- (drawText throws "Out of boundary" instead of clipping).
+  if x < 1 or y < 1 then return end
+  if x + tw - 1 > __viewportW or y + th - 1 > __viewportH then return end
   gpu.drawText(x, y, t, fg2, bg2, fs, tp)
 end
 function __gpu.getTextLength(t, size, pad)
@@ -296,6 +299,7 @@ local function __makeNode(kind, props, defaults)
     focused = false,
     cursor = 0,
     cursorVisible = false,
+    inputOffset = 0, -- horizontal text scroll (set by __layoutInputOffset)
     x = 0, y = 0, w = 0, h = 0,
     -- scroll viewport: content size + current offset (set during layout)
     scrollX = 0, scrollY = 0, contentW = 0, contentH = 0,
@@ -529,6 +533,10 @@ local KEY_END = 269
 local KEY_LSHIFT = 340
 local KEY_RSHIFT = 344
 
+-- The input cursor is drawn as a 2px-wide bar; the horizontal text scroll
+-- (__layoutInputOffset) always keeps that bar inside the content box.
+local CURSOR_W = 2
+
 -- Focusable nodes: only Input in the MVP (extend with Buttons later).
 local function __isFocusable(node)
   return node.kind == "input"
@@ -537,10 +545,39 @@ end
 local function __inputStateFor(path)
   local st = __inputState[path]
   if st == nil then
-    st = { cursor = 0, blink = true, timer = nil }
+    st = { cursor = 0, blink = true, timer = nil, offsetX = 0 }
     __inputState[path] = st
   end
   return st
+end
+
+-- Horizontal text scroll inside an input (real-input long-text behavior):
+-- the text is clipped to the content box and the view follows the cursor.
+-- The offset is persisted per input (__inputState[path].offsetX) and only
+-- adjusted when the cursor would leave the view — typing at the end scrolls
+-- the text left, moving home/left reveals the start, backspace at the end
+-- keeps the text end pinned to the cursor. Ran from __layout (box width is
+-- known there); node.inputOffset is what __drawNode consumes.
+local function __layoutInputOffset(node)
+  local s = node.style
+  local contentW = math.max(0, node.w - s.paddingL - s.paddingR)
+  local fs = s.fontSize or 1
+  local tp = s.textPadding or 1
+  local val = node.value or ""
+  local textW = __gpu.getTextLength(val, fs, tp)
+  local maxOff = math.max(0, textW + CURSOR_W - contentW)
+  local st = __inputStateFor(node.path)
+  local off = st.offsetX or 0
+  if off < 0 then off = 0 elseif off > maxOff then off = maxOff end
+  local cursorX = __gpu.getTextLength(val:sub(1, node.cursor), fs, tp)
+  if cursorX < off then
+    off = cursorX -- cursor left of the view: reveal it at the left edge
+  elseif cursorX + CURSOR_W > off + contentW then
+    off = cursorX + CURSOR_W - contentW -- right of the view: pin to the right edge
+  end
+  if off < 0 then off = 0 elseif off > maxOff then off = maxOff end
+  st.offsetX = off
+  node.inputOffset = off
 end
 
 -- The node that currently owns keyboard input, looked up by path in the last
@@ -611,7 +648,8 @@ local function __focusNext(dir)
 end
 
 -- Focus an input from a pointer press, placing the cursor at the character
--- the press landed on (nearest char boundary of the value text).
+-- the press landed on (nearest char boundary of the value text, accounting
+-- for the horizontal scroll offset).
 local function __focusInputAt(node, x)
   local path = node.path
   if __focusedPath ~= path then
@@ -622,7 +660,7 @@ local function __focusInputAt(node, x)
   local val = node.value or ""
   local fs = node.style.fontSize or 1
   local tp = node.style.textPadding or 1
-  local base = node.x + node.style.paddingL
+  local base = node.x + node.style.paddingL - (node.inputOffset or 0)
   local cur = #val
   for i = 1, #val do
     local cw = __gpu.getTextLength(val:sub(i, i), fs, tp)
@@ -874,7 +912,11 @@ __layout = function(node, x, y, w, h)
   node.w = math.floor(w + 0.5)
   node.h = math.floor(h + 0.5)
 
-  if node.kind == "scroll" then
+  if node.kind == "input" then
+    -- box width is known now: compute the horizontal text scroll (the text
+    -- view follows the cursor; see __layoutInputOffset)
+    __layoutInputOffset(node)
+  elseif node.kind == "scroll" then
     __layoutScroll(node)
     return
   end
@@ -1019,29 +1061,21 @@ local function __addRect(rects, x, y, w, h)
   table.insert(rects, { x - DIRTY_PAD, y - DIRTY_PAD, w + DIRTY_PAD * 2, h + DIRTY_PAD * 2 })
 end
 
--- Full drawn extent of a node for dirty-rect purposes. Text-like nodes
--- (text/button/input) draw their glyphs WITHOUT clipping to the box: an
--- input with a fixed width shows its text (and the blinking cursor) beyond
--- the right edge. The dirty rect must cover that whole span — otherwise
--- editing shrinks the text or moves the cursor and the region beyond the box
--- keeps stale pixels (ghost glyphs / a ghost cursor bar).
+-- Full drawn extent of a node for dirty-rect purposes. text/button draw
+-- their glyphs WITHOUT clipping to the box (a fixed-width button with a long
+-- label paints beyond its edges), so the dirty rect must cover that whole
+-- span — otherwise a label change leaves stale pixels beyond the box. Input
+-- text is clipped to its content box (__layoutInputOffset scrolls it), so
+-- the box alone is its full drawn extent.
 local function __visualRect(node)
   local x, y, w, h = node.x, node.y, node.w, node.h
   local left, right, top, bottom = x, x + w, y, y + h
   local kind = node.kind
-  if kind == "text" or kind == "button" or kind == "input" then
+  if kind == "text" or kind == "button" then
     local s = node.style
     local fs = s.fontSize or 1
     local tp = s.textPadding or 1
-    local str
-    if kind == "text" then
-      str = node.text or ""
-    elseif kind == "button" then
-      str = node.label or ""
-    else
-      str = node.value or ""
-      if #str == 0 then str = node.placeholder or "" end
-    end
+    local str = kind == "text" and (node.text or "") or (node.label or "")
     local tw = __gpu.getTextLength(str, fs, tp)
     local th = FONT_H * fs
     local tx, ty
@@ -1056,10 +1090,6 @@ local function __visualRect(node)
     if tx + tw > right then right = tx + tw end
     if ty < top then top = ty end
     if ty + th > bottom then bottom = ty + th end
-    if kind == "input" then
-      -- the blinking cursor is a 2px bar right after the text
-      if right < tx + tw + 2 then right = tx + tw + 2 end
-    end
   end
   return left, top, right - left, bottom - top
 end
@@ -1132,8 +1162,11 @@ local function __rootBg()
   return (t and t.style and t.style.backgroundColor) or COLOR_BG
 end
 
--- Intersect an existing clip rect with another rect (the scroll viewport).
--- Returns a new clip table, or nil when empty (nothing visible).
+-- Intersect an existing clip rect with another rect (the scroll viewport or
+-- an input's content box), then clamp to the viewport — every clip consumed
+-- by __gpu.drawText/__gpu.filledRectangle is guaranteed inside the screen,
+-- so clipped drawing never hits the GPU's "Out of boundary" throw. Returns a
+-- new clip table, or nil when empty (nothing visible).
 local function __clipIntersect(clip, x, y, w, h)
   local x1, y1, x2, y2 = x, y, x + w - 1, y + h - 1
   if clip then
@@ -1144,6 +1177,10 @@ local function __clipIntersect(clip, x, y, w, h)
     if x2 > cx2 then x2 = cx2 end
     if y2 > cy2 then y2 = cy2 end
   end
+  if x1 < 1 then x1 = 1 end
+  if y1 < 1 then y1 = 1 end
+  if x2 > __viewportW then x2 = __viewportW end
+  if y2 > __viewportH then y2 = __viewportH end
   if x1 > x2 or y1 > y2 then return nil end
   return { x = x1, y = y1, w = x2 - x1 + 1, h = y2 - y1 + 1 }
 end
@@ -1187,19 +1224,26 @@ local function __drawNode(node, clip)
     local fs = s.fontSize or 1
     local tp = s.textPadding or 1
     local val = node.value or ""
+    -- the text view is clipped to the content box and scrolled horizontally
+    -- so the cursor stays visible (__layoutInputOffset set node.inputOffset)
+    local contentW = math.max(0, node.w - s.paddingL - s.paddingR)
+    local contentH = math.max(0, node.h - s.paddingT - s.paddingB)
+    local iclip = __clipIntersect(clip, node.x + s.paddingL, node.y + s.paddingT, contentW, contentH)
+    local off = node.inputOffset or 0
     local show, color = val, s.color or COLOR_TEXT
     if #show == 0 then
       show = node.placeholder or ""
       color = s.placeholderColor or (s.color or COLOR_TEXT)
+      off = 0 -- the placeholder is pinned to the left edge
     end
     if #show > 0 then
-      __gpu.drawText(node.x + s.paddingL, node.y + s.paddingT, show, color, s.textBackgroundColor, fs, tp, clip)
+      __gpu.drawText(node.x + s.paddingL - off, node.y + s.paddingT, show, color, s.textBackgroundColor, fs, tp, iclip)
     end
     -- blinking insertion-point cursor (2px bar, full glyph height)
     if node.focused and node.cursorVisible then
       local cw = __gpu.getTextLength(val:sub(1, node.cursor), fs, tp)
-      local cx = node.x + s.paddingL + cw
-      __gpu.filledRectangle(cx, node.y + s.paddingT, 2, FONT_H * fs, s.cursorColor or COLOR_TEXT, clip)
+      local cx = node.x + s.paddingL + cw - off
+      __gpu.filledRectangle(cx, node.y + s.paddingT, 2, FONT_H * fs, s.cursorColor or COLOR_TEXT, iclip)
     end
   end
   local children = node.children

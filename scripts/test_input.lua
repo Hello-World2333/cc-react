@@ -369,81 +369,87 @@ boot({
   },
 })
 
-print("== text overflow beyond a fixed-width input ==")
--- The fixture inputs are 160px wide. 30 chars = 180px of text: the glyphs
--- (and the cursor) draw beyond the right edge of the box. The dirty rect
--- must cover that overflow span — otherwise, when the text shrinks, the
--- erased region stays too small and stale pixels remain beyond the box.
+print("== long text: clip + cursor-following scroll (real-input behavior) ==")
+-- The fixture inputs are 160px wide with 4px padding → a 152px content box
+-- (~25 full 6px chars). 30 chars = 180px of text. Real-input handling: the
+-- text is CLIPPED to the box and the view scrolls horizontally so the cursor
+-- stays visible — nothing ever paints beyond the box edge.
 local function typeLong(c)
   return function() return { "tm_keyboard_char", "kb", c } end
 end
 local LONG_30 = "abcdefghijklmnopqrstuvwxyz1234"
-boot({
-  { eventFn = touchAt(input1, 4) },
-  -- type 30 chars: cells 0..29; cell 29 ('4') sits beyond the 160px box
-  { eventFn = typeLong("a") },
-  { eventFn = typeLong("b") },
-  { eventFn = typeLong("c") },
-  { eventFn = typeLong("d") },
-  { eventFn = typeLong("e") },
-  { eventFn = typeLong("f") },
-  { eventFn = typeLong("g") },
-  { eventFn = typeLong("h") },
-  { eventFn = typeLong("i") },
-  { eventFn = typeLong("j") },
-  { eventFn = typeLong("k") },
-  { eventFn = typeLong("l") },
-  { eventFn = typeLong("m") },
-  { eventFn = typeLong("n") },
-  { eventFn = typeLong("o") },
-  { eventFn = typeLong("p") },
-  { eventFn = typeLong("q") },
-  { eventFn = typeLong("r") },
-  { eventFn = typeLong("s") },
-  { eventFn = typeLong("t") },
-  { eventFn = typeLong("u") },
-  { eventFn = typeLong("v") },
-  { eventFn = typeLong("w") },
-  { eventFn = typeLong("x") },
-  { eventFn = typeLong("y") },
-  { eventFn = typeLong("z") },
-  { eventFn = typeLong("1") },
-  { eventFn = typeLong("2") },
-  { eventFn = typeLong("3") },
-  { eventFn = typeLong("4") },
-  {
+do
+  local steps = {
+    { eventFn = touchAt(input1, 4) },
+  }
+  for i = 1, #LONG_30 do
+    steps[#steps + 1] = { eventFn = typeLong(LONG_30:sub(i, i)) }
+  end
+  steps[#steps + 1] = {
     snapshot = function()
       local in1 = input1()
       check(in1.value == LONG_30, "30 chars typed (" .. #in1.value .. " chars)")
-      check(in1.x + in1.w < in1.x + 4 + #in1.value * 6,
-        "text (180px) exceeds the fixed box (160px)")
-      -- a pixel in cell 29 (beyond the box right edge) is a glyph pixel,
-      -- not the panel background — the overflow is really painted
-      local px = stub.buf[in1.y + 4][in1.x + 178]
-      check(px ~= C_PANEL, "text visibly overflows the box edge")
+      -- the view scrolled so the cursor (at the end) is visible:
+      -- offset = textW + cursor width - contentW = 180 + 2 - 152
+      check(in1.inputOffset == 30, "view scrolled to keep the cursor visible (offset 30)")
+      local row = in1.y + 4
+      -- clipped: nothing paints beyond the box right edge
+      check(stub.buf[row][in1.x + 160] == C_PANEL,
+        "text clipped to the box (no pixels beyond the right edge)")
+      -- text visible inside the content box
+      check(stub.buf[row][in1.x + 4] ~= C_BG,
+        "scrolled text visible at the content left edge")
+      -- the cursor bar sits at the content right edge (kept visible)
+      check(stub.buf[row][in1.x + 154] == C_FOCUS,
+        "cursor kept visible at the right edge of the box")
     end,
-  },
-  -- Backspace: the old 30th char + old cursor bar sat beyond the box — they
-  -- must be erased (panel bg), not left as ghost pixels.
-  { eventFn = kbKey(259) },
-  {
+  }
+  -- click at the content left edge: the click maps through the scroll offset
+  -- to the first VISIBLE char ('f', index 5) — not the hidden 'a'
+  steps[#steps + 1] = { eventFn = touchAt(input1, 4) }
+  steps[#steps + 1] = {
+    snapshot = function()
+      check(cursorOf(input1().path) == 5,
+        "click at the visible left edge placed the cursor on 'f' (index 5)")
+    end,
+  }
+  -- Home reveals the start
+  steps[#steps + 1] = { eventFn = kbKey(268) }
+  steps[#steps + 1] = {
     snapshot = function()
       local in1 = input1()
-      check(in1.value == "abcdefghijklmnopqrstuvwxyz123",
-        "backspace shortened the text to 29 chars")
-      -- cells 0..28 end at x+4+28*6+5 = x+177; the new cursor is a 2px bar
-      -- at x+178..179. Everything beyond it (old '4' glyph at x+178..183,
-      -- old cursor bar at x+184..185) must show the panel background.
-      local row = in1.y + 4
-      local ghost = 0
-      for x = in1.x + 180, in1.x + 196 do
-        if stub.buf[row][x] ~= C_PANEL then ghost = ghost + 1 end
-      end
-      check(ghost == 0,
-        "no ghost pixels beyond the box after backspace (" .. ghost .. " stale px)")
+      check(in1.inputOffset == 0, "Home scrolled back to the text start (offset 0)")
+      check(cursorOf(in1.path) == 0, "cursor at 0 after Home")
+      check(stub.buf[in1.y + 4][in1.x + 4] == C_FOCUS,
+        "cursor at the left edge after Home")
     end,
-  },
-})
+  }
+  -- End + Backspace: the view follows the cursor (offset = textW+2-contentW)
+  steps[#steps + 1] = { eventFn = kbKey(269) }
+  steps[#steps + 1] = { eventFn = kbKey(259) }
+  steps[#steps + 1] = {
+    snapshot = function()
+      local in1 = input1()
+      check(in1.value == "abcdefghijklmnopqrstuvwxyz123", "29 chars after Backspace")
+      check(cursorOf(in1.path) == 29, "cursor at the end (29)")
+      check(in1.inputOffset == 24, "view followed the cursor (offset 24)")
+    end,
+  }
+  -- left-arrow walks the cursor back; the view only scrolls when the cursor
+  -- reaches the left edge — gradual, like a real input
+  for i = 1, 27 do steps[#steps + 1] = { eventFn = kbKey(263) } end
+  steps[#steps + 1] = {
+    snapshot = function()
+      local in1 = input1()
+      check(cursorOf(in1.path) == 2, "27 left-arrows moved the cursor to 2")
+      check(in1.inputOffset == 12,
+        "view scrolled back only as the cursor hit the edge (offset 12)")
+      check(stub.buf[in1.y + 4][in1.x + 4] == C_FOCUS,
+        "cursor at the left edge after scrolling back")
+    end,
+  }
+  boot(steps)
+end
 
 print("")
 if t.failures == 0 then

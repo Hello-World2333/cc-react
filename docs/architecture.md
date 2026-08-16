@@ -223,6 +223,15 @@ MVP 已按本文档落地，代码布局见仓库根目录 README。与本文档
     焦点边框（`focusBorderColor`）、2px 插入条光标（`cursorColor`，`os.startTimer(0.5)` 驱动闪烁，
     `timer` 事件切换 `cursorVisible` 后走脏矩形重绘；每次编辑重置闪烁）。测量：宽度 = value 或
     placeholder 的文本宽度（都空时一个字符格），显式 `width` 优先。
+  - **长文本滚动与裁剪（2025-08 追加）**：Input 对超出内容盒的文本做**真实输入框式处理** ——
+    文本按内容盒裁剪（`__gpu.drawText` 的 clip 子区间拆分，复用 Scroll 的逐字符裁剪），视图随
+    光标水平滚动：`__layoutInputOffset`（布局期，盒宽已知）按「光标保持在内容盒内」的策略计算
+    偏移，存于 `__inputState[path].offsetX`（持久化，随光标/值变化增量调整 —— 输入到末尾文本
+    左移、Home/左移逐步回滚、Backspace 保持文本尾随光标；值变短时钳制）。点击定位按偏移映射到
+    可见字符；光标条（2px）始终在盒内。为此 `__gpu.drawText` 的 clip 路径不再受「x<1 / 越视口」
+    早退约束（clip 由 `__clipIntersect` 统一钳制到视口内，负 x 的滚动文本安全绘制），
+    `__clipIntersect` 增加视口钳制（顺带修正 Scroll 容器部分出屏时的越界风险）。脏矩形 =
+    内容盒（文本不再越界绘制，`__visualRect` 的 Input 扩展分支移除）。
   - **键盘事件契约（真机源码验证）**：Tom's Peripherals 键盘**透传 Minecraft 的 GLFW 键码**
     （不是 CC 的 PC scancode）：Enter 257 / Tab 258 / Backspace 259 / Delete 261 / Left 263 /
     Right 262 / Home 268 / End 269 / Shift 340/344。事件形态（fireNativeEvents=false）：
