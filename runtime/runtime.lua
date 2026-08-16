@@ -19,8 +19,9 @@
 
           local simpleParallel = require("lib.simpleParallel")
           local ui = require("ui")
+          ui.configureNetwork({ interfaces = { ... } }) -- optional (fetch)
           simpleParallel.add(function() ui.start("left") end)
-          -- future: simpleParallel.add(networkTask)
+          simpleParallel.add(function() ui.networkLoop() end) -- fetch worker
           simpleParallel.start()
 
       CC's parallel scheduler first resumes every task with an empty event, so
@@ -744,6 +745,262 @@ local function __handleKeyDown(node, key)
     local shift = __modsDown[KEY_LSHIFT] or __modsDown[KEY_RSHIFT]
     __focusNext(shift and -1 or 1)
   end
+end
+
+-- ============================================================
+-- 3c. Async (futures) + network (milestone 3)
+-- ============================================================
+-- `async function` bodies compile to an event-driven state machine: code
+-- runs synchronously until an `await`, then registers a continuation with
+-- the awaited future; the rest of the body runs inside the continuation when
+-- the future resolves. No native Lua coroutines are involved (a coroutine
+-- that calls sleep() would exit), so every await point is a plain closure.
+--
+-- Futures are the async operations themselves (`fetch(...)` returns one).
+-- The UI never blocks on them: the network worker task (the module's
+-- networkLoop(), added by the main program alongside ui.start()) runs the
+-- blocking docs/lib HTTP client and reports back through a queued event,
+-- which the UI event loop turns into a future resolution.
+
+local __futSeq = 0
+
+local function __newFuture()
+  __futSeq = __futSeq + 1
+  return {
+    __future = true,
+    id = __futSeq,
+    resolved = false,
+    value = nil,
+    conts = {}, -- waiting continuations: function(value)
+  }
+end
+
+-- Resolve a future with a value: every registered continuation runs now (the
+-- caller is the UI event loop, so state setters called here schedule a
+-- repaint through the normal dirty-rect path). Already-resolved futures are
+-- no-ops, so the FIRST resolution wins.
+local function __resolveFuture(f, value)
+  if f == nil or f.resolved then return end
+  f.resolved = true
+  f.value = value
+  local conts = f.conts
+  f.conts = nil
+  for i = 1, #conts do
+    local ok, err = pcall(conts[i], value)
+    if not ok then print("cc-react: async continuation error: " .. tostring(err)) end
+  end
+end
+
+-- `await X` compiles to __await(X, continuation). A future resolves the
+-- continuation with its value (now, or later via __resolveFuture); any other
+-- value passes through immediately (JS-style await on non-promises).
+local function __await(f, cont)
+  if type(f) == "table" and f.__future then
+    if f.resolved then
+      cont(f.value)
+    else
+      f.conts[#f.conts + 1] = cont
+    end
+  else
+    cont(f)
+  end
+end
+
+-- ---- network bridge ------------------------------------------------------
+-- fetch() queues a job for the network worker task and returns a future the
+-- UI awaits. The worker (networkLoop) runs the blocking HTTP client — the
+-- stack in docs/lib — inside a simpleParallel coroutine, so requests never
+-- freeze the UI. The main program wires it up before simpleParallel.start():
+--
+--   local ui = require("ui")
+--   ui.configureNetwork({
+--     interfaces = { { side = "back", channel = 1, ip = "192.168.1.10",
+--                      mask = "255.255.255.0", gateway = "192.168.1.1" } },
+--     dns = "8.8.8.8",   -- optional DNS server (hostnames in fetch URLs)
+--     timeout = 10,      -- HTTP timeout, seconds (default 10)
+--   })
+--   simpleParallel.add(function() ui.start("left") end)
+--   simpleParallel.add(function() ui.networkLoop() end)
+--   simpleParallel.start()
+--
+-- A fetch resolves with a docs/lib HTTP response ({ ok, status, statusText,
+-- headers, body, text(), json() }); failures resolve with
+-- { ok = false, error = <message> } so async code can branch on resp.ok
+-- without try/catch (await try/catch is not compiled yet).
+
+local __netJobs = {}      -- pending fetch jobs: { id, url, options }
+local __netPending = {}   -- job id -> future
+local __netSeq = 0
+local __netClient = nil   -- lazy-built HTTP client (docs/lib http)
+local __netInitError = nil
+local __netConfig = nil
+local __netBackend = nil  -- test hook: replaces the real HTTP client
+local __netDeferred = {}  -- id -> job whose backend asked to defer
+
+local function __fetch(url, options)
+  __netSeq = __netSeq + 1
+  local id = __netSeq
+  local f = __newFuture()
+  __netPending[id] = f
+  __netJobs[#__netJobs + 1] = { id = id, url = url, options = options or {} }
+  if os.queueEvent then os.queueEvent("ccreact_net_job") end
+  return f
+end
+
+-- Build the docs/lib HTTP client on the configured IP stack. Must run BEFORE
+-- simpleParallel.start(): the stack registers its own worker tasks (ARP/DNS
+-- receive loops) at construction time. Failures are recorded and reported by
+-- the next fetch instead of crashing the main program.
+local function __netInit()
+  if __netClient ~= nil or __netInitError ~= nil then return end
+  if __netConfig == nil then
+    __netInitError = "network not configured: call ui.configureNetwork(...) before simpleParallel.start()"
+    return
+  end
+  local ok, res = pcall(function()
+    local IP = require("lib.ip")
+    local HTTP = require("lib.http")
+    local ipIface = IP.new({ mode = "host", interfaces = __netConfig.interfaces or {} })
+    local cfg = { timeout = __netConfig.timeout or 10 }
+    if __netConfig.dns then cfg.dnsServer = __netConfig.dns end
+    return HTTP.newClient(ipIface, cfg)
+  end)
+  if ok then
+    __netClient = res
+  else
+    __netInitError = tostring(res)
+  end
+end
+
+local function __configureNetwork(config)
+  __netConfig = config or {}
+  __netInit()
+end
+
+-- Perform one fetch job. Runs inside the network worker task, so the
+-- blocking HTTP client may yield on sockets (fine — simpleParallel manages
+-- this coroutine). Returns resp, err; a backend returning `false` defers the
+-- job (the test harness resolves it later via resolveNetworkJob).
+-- NOTE: this is deliberately NOT pcall'd by the caller — the docs/lib HTTP
+-- client yields inside socket receive, and yielding across a pcall C-boundary
+-- kills the coroutine (docs/lib http.lua warns about exactly this).
+local function __netFetchOne(job)
+  if __netBackend then
+    local resp, err = __netBackend(job.url, job.options)
+    if resp == false then
+      __netDeferred[job.id] = job
+      return false
+    end
+    return resp, err
+  end
+  if __netInitError == nil and __netClient == nil then __netInit() end
+  if __netInitError then return nil, __netInitError end
+  if __netClient == nil then return nil, "network not configured" end
+  return __netClient:fetch(job.url, job.options)
+end
+
+-- The network worker task body. It drains the job queue on every wake-up,
+-- then waits for any event (an event can be missed while a blocking fetch is
+-- in flight — the drain loop catches up when it returns). The completion
+-- event always carries a response TABLE (errors are normalized to a failed
+-- response) — a nil payload arg would create a hole in the event table and
+-- later args would be lost when the scheduler unpacks it.
+local function __networkLoop()
+  while true do
+    while #__netJobs > 0 do
+      local job = table.remove(__netJobs, 1)
+      local resp, err = __netFetchOne(job) -- may yield; never wrapped in pcall
+      if resp == false then
+        -- deferred: resolved later via resolveNetworkJob
+      elseif os.queueEvent then
+        if err ~= nil then resp = { ok = false, error = err } end
+        if resp == nil then resp = { ok = false, error = "empty response" } end
+        os.queueEvent("ccreact_net_done", job.id, resp)
+      end
+    end
+    os.pullEvent()
+  end
+end
+
+-- Resolve a deferred job (test harness: feed a network response by hand).
+local function __netResolveDeferred(id, resp, err)
+  if __netDeferred[id] == nil then return end
+  __netDeferred[id] = nil
+  if os.queueEvent then
+    if err ~= nil then resp = { ok = false, error = err } end
+    if resp == nil then resp = { ok = false, error = "empty response" } end
+    os.queueEvent("ccreact_net_done", id, resp)
+  end
+end
+
+-- Deferred jobs in id order (test harness: find the job to resolve).
+local function __netPendingJobs()
+  local out = {}
+  for id = 1, __netSeq do
+    local job = __netDeferred[id]
+    if job then out[#out + 1] = { id = id, url = job.url, options = job.options } end
+  end
+  return out
+end
+
+-- ---- useRequest ----------------------------------------------------------
+-- Three-state data-fetch hook: { data, loading, error, refetch }. fetcher()
+-- must return a future (typically () => fetch(url)). Fetches on mount and
+-- whenever deps change; a stale response (a newer request started since) is
+-- ignored, so refetching or dep changes can't be clobbered by an older
+-- in-flight request. `data` is the resolved response (check .ok).
+local function __useRequest(fetcher, deps)
+  __hookIdx = __hookIdx + 1
+  local dataIdx = __hookIdx
+  __hookIdx = __hookIdx + 1
+  local loadingIdx = __hookIdx
+  __hookIdx = __hookIdx + 1
+  local errorIdx = __hookIdx
+  __hookIdx = __hookIdx + 1
+  local tokenIdx = __hookIdx
+  __hookIdx = __hookIdx + 1
+  local effectIdx = __hookIdx
+
+  local path = __currentPath
+  local st = __state[path]
+  if st.slots[loadingIdx] == nil then st.slots[loadingIdx] = false end
+  if st.slots[tokenIdx] == nil then st.slots[tokenIdx] = 0 end
+
+  local function startRequest()
+    local myTok = st.slots[tokenIdx] + 1
+    st.slots[tokenIdx] = myTok
+    st.slots[loadingIdx] = true
+    __scheduleRender()
+    local f = fetcher()
+    __await(f, function(resp)
+      if st.slots[tokenIdx] ~= myTok then return end -- stale response: a newer request won
+      st.slots[loadingIdx] = false
+      if resp ~= nil and resp.ok then
+        st.slots[dataIdx] = resp
+        st.slots[errorIdx] = nil
+      else
+        st.slots[dataIdx] = nil
+        st.slots[errorIdx] = (resp ~= nil and resp.error) or "request failed"
+      end
+      __scheduleRender()
+    end)
+  end
+
+  -- effect: fetch on mount and whenever deps change (fires after the draw,
+  -- exactly like __useEffect)
+  local prev = st.effects[effectIdx]
+  local changed = prev == nil or not __sameDeps(prev.deps, deps)
+  st.effects[effectIdx] = { deps = deps, fn = nil }
+  if changed then
+    table.insert(__pendingEffects, startRequest)
+  end
+
+  return {
+    data = st.slots[dataIdx],
+    loading = st.slots[loadingIdx],
+    error = st.slots[errorIdx],
+    refetch = startRequest,
+  }
 end
 
 -- ============================================================
@@ -1535,6 +1792,16 @@ local function __handleEvent(e)
       local node = __focusedNode()
       if node then __inputInsert(node, content) end
     end
+  elseif name == "ccreact_net_done" then
+    -- (id, resp) — a fetch worker finished a job: resolve the pending future
+    -- so the await continuation (and useRequest) can run. The worker already
+    -- normalized errors to a failed response ({ ok = false, error = msg }).
+    local id, resp = e[2], e[3]
+    local f = __netPending[id]
+    if f then
+      __netPending[id] = nil
+      __resolveFuture(f, resp)
+    end
   elseif name == "timer" then
     -- cursor blink tick for the focused input
     local id = e[2]
@@ -1600,7 +1867,14 @@ ccreact = {
   -- entry points
   start = function(side) return __start(side) end,
   mount = function(rootFn) __mount(rootFn) end,
+  -- network (milestone 3): the main program configures the stack and adds
+  -- networkLoop() as a second simpleParallel task before simpleParallel.start()
+  configureNetwork = function(config) __configureNetwork(config) end,
+  networkLoop = function() return __networkLoop() end,
   -- debug / test hooks
+  setNetworkBackend = function(fn) __netBackend = fn end,
+  getNetworkJobs = function() return __netPendingJobs() end,
+  resolveNetworkJob = function(id, resp, err) __netResolveDeferred(id, resp, err) end,
   getTree = function() return __lastTree end,
   getViewport = function() return __viewportW, __viewportH end,
   isPressed = function() return __pressedPath end,

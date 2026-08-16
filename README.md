@@ -7,8 +7,11 @@
 字体度量/启动顺序等，经 1.3.1 字节码验证）见 [docs/toms-gpu-api.md](docs/toms-gpu-api.md)。
 **当前状态：MVP 已实现**，满足 §14 两条验收标准：静态页面渲染 + 交互/脏矩形重绘闭环；
 多文件 `import` 已支持（应用可拆多个 `.tsx`/`.ts` 文件，编译期打包进单个 Lua 模块）；
-里程碑 1「键盘输入 + 焦点管理」已实现（`<Input>` 文本框 + 点击聚焦 / Tab 切换 + 光标闪烁）。
-编译产物为**模块**（`start(side)` 任务函数），由主程序经 simpleParallel 非阻塞调度（为未来网络功能兼容）。
+里程碑 1「键盘输入 + 焦点管理」已实现（`<Input>` 文本框 + 点击聚焦 / Tab 切换 + 光标闪烁）；
+**里程碑 3「网络接入」已实现**：`async/await` 编译为事件驱动状态机 + `fetch`（复用 `docs/lib`
+HTTP 客户端，后台任务执行）+ `useRequest`（loading/data/error 三态）。
+编译产物为**模块**（`start(side)` 任务函数），由主程序经 simpleParallel 非阻塞调度
+（与网络任务 `networkLoop()` 并发）。
 
 ## 目录
 
@@ -19,7 +22,7 @@ framework/         全局 TS 类型声明（useState/useEffect/render 与 JSX �
 demo/App.tsx       演示入口（计数器 + 条件徽章 + 动态列表 + 键盘输入，import 多个组件文件）
 demo/components/   演示组件（Header / CounterControls / Badge / HistoryList）
 demo/main.lua      演示主程序（require 编译产物，经 simpleParallel 非阻塞调度 UI 任务）
-scripts/           无头测试（stub GPU + CC 环境：验收标准 + 模块/并行契约 + 多文件 import + 滚动 + 键盘输入用例）
+scripts/           无头测试（stub GPU + CC 环境：验收标准 + 模块/并行契约 + 多文件 import + 滚动 + 键盘输入 + 网络用例）
 dist/ui.lua        编译产物（模块：require 后由主程序组合调度，拷进电脑即可用）
 ```
 
@@ -36,8 +39,8 @@ npm run test:all   # typecheck + build + test
 
 编译产物是**模块**而非独立程序：它导出 `start(side)` 任务函数，由主程序通过
 [simpleParallel](https://tweaked.cc/module/parallel.html)（`parallel.waitForAll` 封装）调度，
-从而与未来的网络任务（`docs/lib/` 网络栈）并发运行。把下列文件通过 SFTP 拷进游戏存档的
-电脑目录（`saves/<存档>/computers/<id>/`）：
+从而与网络任务（`docs/lib/` 网络栈 + 模块的 `networkLoop()`）并发运行。把下列文件通过 SFTP 拷进
+游戏存档的电脑目录（`saves/<存档>/computers/<id>/`）：
 
 ```
 ui.lua      ← dist/ui.lua           编译产物
@@ -56,8 +59,20 @@ lua main.lua left
 ```lua
 local simpleParallel = require("lib.simpleParallel")
 local ui = require("ui")
+
+-- 网络（里程碑 3）：配置 IP 栈（必须在 simpleParallel.start() 之前——栈自身的
+-- ARP/DNS 收包任务在构造时注册），然后 networkLoop() 作为 fetch 的 worker 任务。
+-- 没有网卡时 configureNetwork 记录错误，应用里的 fetch 会把错误显示在屏幕上。
+ui.configureNetwork({
+  interfaces = {
+    { side = "back", channel = 1, ip = "192.168.1.10", mask = "255.255.255.0", gateway = "192.168.1.1" },
+  },
+  dns = "8.8.8.8",   -- 可选：fetch URL 用域名时需要
+  timeout = 10,      -- HTTP 超时（秒）
+})
+
 simpleParallel.add(function() ui.start("left") end)   -- UI 任务
--- 未来：simpleParallel.add(networkTask)              -- 网络任务
+simpleParallel.add(function() ui.networkLoop() end)   -- fetch worker（网络任务）
 simpleParallel.start()
 ```
 
@@ -163,6 +178,44 @@ Tab / Shift+Tab 在输入框之间循环焦点；点击输入框以外的区域�
 `onKey(key, isUp)` 可拿到原始按键（**GLFW 键码**，Tom's 键盘透传 Minecraft 键码：
 Enter 257 / Tab 258 / Backspace 259 / Delete 261 / Left 263 / Right 262 / Home 268 / End 269）。
 
+### 网络（async/await + fetch + useRequest，里程碑 3）
+
+`async function` / `async () =>` 编译为**事件驱动状态机**：体部同步执行到第一个 `await`，
+之后的所有代码成为续体闭包，等 `await` 的 future 解析后再运行（完全不用原生 Lua 协程）。
+`fetch(url, options)` 返回一个 future，请求在**后台任务**（主程序的 `ui.networkLoop()`）里执行，
+UI 事件循环不被阻塞；失败（连接失败 / DNS / 未配置）解析为 `{ ok = false, error }` 响应，
+直接按 `resp.ok` 分支即可（v1 未编译 await 的 try/catch）：
+
+```tsx
+const [status, setStatus] = useState('press fetch');
+
+async function fetchHello() {
+  setStatus('fetching...');
+  const resp = await fetch('http://192.168.1.50:8080/hello');
+  if (resp.ok) {
+    const msg = resp.json();
+    setStatus('hello: ' + msg.msg);
+  } else {
+    setStatus('error: ' + resp.error);
+  }
+}
+
+<Button label="Fetch" onClick={fetchHello} />
+<Text>{status}</Text>
+```
+
+`useRequest` 封装三态（loading / data / error）：挂载与 `deps` 变化时自动请求，`refetch()` 立即
+重发；过期响应（新请求已发起后旧请求才返回）会被丢弃：
+
+```tsx
+const req = useRequest(() => fetch('http://192.168.1.50:8080/quote'));
+// req.loading / req.data / req.error / req.refetch()
+<Text>{req.loading ? 'loading…' : req.error ? req.error : req.data.body}</Text>
+```
+
+部署时主程序要配置网络栈并注册 worker（见「部署」）：`ui.configureNetwork({...})` +
+`simpleParallel.add(function() ui.networkLoop() end)`。`fetch` 的响应是 docs/lib 的 HTTP 响应
+（`ok / status / statusText / headers / body`，`text()` / `json()`）；JSON body 用 `resp.json()`。
 
 ### 支持范围（MVP）
 
@@ -186,6 +239,11 @@ Enter 257 / Tab 258 / Backspace 259 / Delete 261 / Left 263 / Right 262 / Home 2
 - 多文件 import：应用可拆成多个 `.tsx` / `.ts` 文件（`import` / `export`），编译期打包进单个 Lua 模块；
   同名组件自动改名、跨文件 hooks/props/常量均可用（见上文「多文件」）；编译产物是模块，
   `start(side)` 作为 simpleParallel 任务被主程序调度（见「部署」）
+- 网络（里程碑 3）：`async function` / `async () =>` 编译为事件驱动状态机（`await` → 续体闭包链，
+  无原生协程）；`fetch(url, options)` 返回 future（请求在 `networkLoop()` 后台任务执行；
+  失败解析为 `{ ok = false, error }`）；`useRequest(fetcher, deps)` 三态 hook（loading/data/error +
+  refetch，含过期响应丢弃）；`await` 非 future 值按 JS 语义透传；主程序用
+  `ui.configureNetwork(...)` + `simpleParallel.add(ui.networkLoop)` 接线（见「网络」与「部署」）
 
 ## 故障排查：真机黑屏（已修复 2025-08）
 
@@ -231,3 +289,13 @@ Enter 257 / Tab 258 / Backspace 259 / Delete 261 / Left 263 / Right 262 / Home 2
   按键/点击会重置闪烁并重新计时。对性能敏感的场景可在 `onChange` 中自行管理。
 - 键盘事件只走 Tom's Peripherals 前缀形态（`tm_keyboard_*`，`fireNativeEvents` 默认 false）；
   原生 `key`/`char` 事件形态未接入。
+- 网络（里程碑 3）的 v1 限制：
+  - 每条语句**一个** `await`；`await` 只支持在语句层（变量声明初始化、表达式语句、
+    `return await E`），**出现在 if/else 分支内会编译报错**（把 await 提到分支上方即可）；
+    循环/switch 本就不在 codegen 支持范围。多级**顺序** await 支持。
+  - `await` 的 try/catch 未编译：错误处理用 `resp.ok` / `resp.error` 分支。
+  - async 组件（含 JSX 的 async 函数）编译期报错——组件必须同步返回元素。
+  - `fetch` 需要主程序配置网络（`ui.configureNetwork`）+ 注册 `networkLoop()` 任务；
+    未配置时 fetch 解析为 `{ ok = false, error = "network not configured: ..." }`。
+  - 网络栈（`docs/lib`）的 IP/ARP/DNS 任务必须在 `simpleParallel.start()` 前构造
+    （`configureNetwork` 在 start 前调用即可）；`fetch` 只支持 `http://`（docs/lib 现状）。

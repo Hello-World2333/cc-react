@@ -9,9 +9,10 @@
     "build:fixture": "node compiler/index.mjs scripts/fixtures/multi/App.tsx dist/fixture-multi.lua",
     "build:fixture:scroll": "node compiler/index.mjs scripts/fixtures/scroll/App.tsx dist/fixture-scroll.lua",
     "build:fixture:input": "node compiler/index.mjs scripts/fixtures/input/App.tsx dist/fixture-input.lua",
+    "build:fixture:network": "node compiler/index.mjs scripts/fixtures/network/App.tsx dist/fixture-network.lua",
     "typecheck": "tsc --noEmit",
-    "test": "luac5.1 -p dist/ui.lua && luac5.1 -p dist/fixture-multi.lua && luac5.1 -p dist/fixture-scroll.lua && luac5.1 -p dist/fixture-input.lua && lua5.1 scripts/test_main.lua dist/ui.lua && lua5.1 scripts/test_multiimport.lua dist/fixture-multi.lua && lua5.1 scripts/test_scroll.lua dist/fixture-scroll.lua && lua5.1 scripts/test_input.lua dist/fixture-input.lua",
-    "test:all": "npm run typecheck && npm run build && npm run build:fixture && npm run build:fixture:scroll && npm run build:fixture:input && npm run test"
+    "test": "luac5.1 -p dist/ui.lua && luac5.1 -p dist/fixture-multi.lua && luac5.1 -p dist/fixture-scroll.lua && luac5.1 -p dist/fixture-input.lua && luac5.1 -p dist/fixture-network.lua && lua5.1 scripts/test_main.lua dist/ui.lua && lua5.1 scripts/test_multiimport.lua dist/fixture-multi.lua && lua5.1 scripts/test_scroll.lua dist/fixture-scroll.lua && lua5.1 scripts/test_input.lua dist/fixture-input.lua && lua5.1 scripts/test_network.lua dist/fixture-network.lua",
+    "test:all": "npm run typecheck && npm run build && npm run build:fixture && npm run build:fixture:scroll && npm run build:fixture:input && npm run build:fixture:network && npm run test"
   },
   "dependencies": {
     "@babel/parser": "^7.24.0",

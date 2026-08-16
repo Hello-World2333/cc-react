@@ -5,6 +5,8 @@
 
 > **实现状态（2025-08）：MVP 已完成**，见文末「附录：MVP 实现记录」。§14 两条验收标准均已通过
 > 无头测试（`npm run test`）：静态页面渲染 + 交互/脏矩形重绘闭环。
+> **网络接入（2025-08，里程碑 3）已完成**：async/await 编译为事件驱动状态机 + 运行时 fetch
+> （复用 `docs/lib` HTTP 客户端）+ `useRequest` hook，见文末「附录：网络接入」。
 
 ## 1. 项目概述
 
@@ -139,12 +141,14 @@ MVP 框架包含：
 
 **不在首版**：网络数据 hook（useRequest/useSWR）、自定义字体/中文支持。
 
-## 11. 异步与网络（未来）
+## 11. 异步与网络
 
-- 首版不接网络，纯本地 UI。
-- 未来方案（已定）：**async 函数编译为事件驱动状态机**——`await` 之后的代码拆成续体，由网络事件驱动继续执行；完全避开原生 Lua 协程陷阱，贴合 CC 事件模型。
-- 网络能力复用 `docs/lib`（`fetch` 等）。
-- 可选封装：useRequest（loading / data / error 三态管理），视需求再定。
+- 首版不接网络，纯本地 UI。**已实现（2025-08，里程碑 3）**，见附录「网络接入」。
+- 实现方案（已定）：**async 函数编译为事件驱动状态机**——`await` 之后的代码拆成续体（closure），
+  由网络事件驱动继续执行；完全避开原生 Lua 协程陷阱，贴合 CC 事件模型。
+- 网络能力复用 `docs/lib`（`fetch` 等），在独立的 simpleParallel 任务（`networkLoop`）中执行，
+  不阻塞 UI 事件循环。
+- `useRequest`（loading / data / error 三态管理）已实现。
 
 ## 12. 显示环境
 
@@ -168,7 +172,8 @@ MVP 之外的后续里程碑（按优先级建议）：
 
 1. ~~键盘输入 + 焦点管理~~ **已实现（2025-08）**，见附录「键盘输入与焦点管理」
 2. 动态列表（keyed diff）
-3. 网络接入（async 状态机编译；任务侧已就绪 —— 模块的 `start(side)` 可直接与网络栈任务并行）
+3. ~~网络接入（async 状态机编译；任务侧已就绪 —— 模块的 `start(side)` 可直接与网络栈任务并行）~~
+   **已实现（2025-08）**，见附录「网络接入」
 4. 动画（声明式 transition）
 5. ~~多文件 import（TSX 拆多个模块；产物已模块化，运行时仍内嵌）~~ **已实现（2025-08）**，
    见附录「多文件 import」
@@ -288,4 +293,39 @@ MVP 已按本文档落地，代码布局见仓库根目录 README。与本文档
     `scripts/fixtures/multi/`（同名组件冲突、默认导出、`.ts` 工具模块、跨文件 hooks、导入颜色常量）
     与 `scripts/test_multiimport.lua`，共享 `scripts/cc_stub.lua` 桩环境（从 `test_main.lua` 抽出）。
 - **工具链**（§13）：部署仍由开发者自行 SFTP，工具链不负责。
+- **网络接入（2025-08，里程碑 3）**：async/await 编译为事件驱动状态机 + 运行时 fetch（复用
+  `docs/lib` HTTP 客户端）+ `useRequest` hook。落地方式与 §11 一致，要点：
+  - **async 降级（编译器，`codegen.mjs`）**：`async function` / `async () =>` 编译为普通 Lua
+    函数：体部同步执行到第一个 `await`，随后把「await 之后的所有代码」注册为续体闭包
+    （`__await(未来对象, function(值) ... end)`），函数立即返回自己的 future
+    （`__newFuture()`，结束时 `__resolveFuture(__self, 返回值)`）。续体内部再遇 `await`
+    则递归再拆——**纯闭包链，全程不创建原生 Lua 协程**（规避 sleep() 杀协程陷阱）。
+    v1 范围（README 已文档化）：每条语句一个 `await`，支持 `const x = await E`（绑定即续体参数）、
+    表达式语句（函数调用等）、`return await E`、多级顺序 await；`await` 出现在 if/else 分支内会
+    编译报错（提示把 await 提到分支上方）；循环/switch 本来就不在 codegen 支持范围。嵌套 async
+    函数自成一体（编译期不往下钻）。`await` 非 future 值按 JS 语义直接透传（`await 42` → 42）。
+  - **fetch（运行时网络桥）**：`fetch(url, options)` 编译为 `__fetch`——登记一个作业并
+    `os.queueEvent("ccreact_net_job")` 唤醒网络 worker，返回 future。worker 是模块暴露的
+    `networkLoop()` 任务（主程序 `simpleParallel.add(function() ui.networkLoop() end)`），
+    阻塞式调用 `docs/lib` 的 HTTP client（在 simpleParallel 协程内可安全 sleep/收包），完成后
+    `os.queueEvent("ccreact_net_done", id, resp)`；UI 事件循环收到后解析 future，续体运行
+    （状态更新走正常脏矩形重绘）。作业队列每唤醒必排空，worker 在阻塞 fetch 期间错过唤醒事件也
+    不会丢作业。错误（连接失败/DNS/未配置）统一归一化为 `{ ok = false, error = msg }` 响应表，
+    事件载荷**绝不携带 nil 参数**（nil 会在事件表里留空洞，调度器 unpack 会丢后续参数）。
+  - **网络栈配置**：主程序在 `simpleParallel.start()` **之前**调用
+    `ui.configureNetwork({ interfaces = { { side, channel, ip, mask, gateway } }, dns, timeout })`
+    ——IP 栈（`lib.ip` 的 ARP/DNS 收包任务）必须在 start 前注册；配置失败（如没有网卡）记录错误，
+    由后续 fetch 上报而非崩溃。未配置时 fetch 解析为 `{ ok = false, error = "network not
+    configured: ..." }`。
+  - **useRequest（运行时 hook）**：`useRequest(fetcher, deps)` 管理 data/loading/error + token
+    四槽位：挂载与 deps 变化时触发请求；`refetch()` 立即重发；token 机制丢弃过期响应（新请求已
+    发起时旧续体直接返回，不会用旧数据覆盖新数据）。返回 `{ data, loading, error, refetch }`。
+  - **验证**：新增 `scripts/fixtures/network/`（顺序 await 值流、错误路径、await 非 future、
+    useRequest 挂载/加载/refetch/过期保护/无关重渲染不重发）与 `scripts/test_network.lua`
+    （无头测试：`networkLoop` 作为 parallel 第二任务 + `ui.setNetworkBackend` 桩后端 +
+    `getNetworkJobs`/`resolveNetworkJob` 手动喂响应）。`cc_stub.lua` 增加 `os.queueEvent`
+    与队列优先排空（先于 step 脚本），模拟真实 CC 的「排队事件广播给所有消费者」。
+  - **与文档的偏差**：`fetch`/`useRequest` 是全局（`MAPPED_FUNCS` 映射到运行时），TS 类型层
+    `Future<T>` 以 `PromiseLike<T>` 呈现以便 `await` 解包类型。async 组件（含 JSX 的 async 函数）
+    编译期报错。
 

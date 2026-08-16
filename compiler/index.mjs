@@ -60,9 +60,15 @@ try {
 const ast = parse(bundled, { sourceType: 'module', plugins: ['jsx'] });
 
 // ---- collect component names (functions whose body contains JSX) ----
+// Async functions are never components (they can't render synchronously);
+// they're collected separately so render(<AsyncApp/>) gives a clear error.
 const components = [];
+const asyncComponents = [];
 const collectFn = (node) => {
-  if (node && node.id && node.id.name && containsJsx(node)) components.push(node.id.name);
+  if (node && node.id && node.id.name && containsJsx(node)) {
+    if (node.async) asyncComponents.push(node.id.name);
+    else components.push(node.id.name);
+  }
 };
 for (const stmt of ast.program.body) {
   if (stmt.type === 'FunctionDeclaration') {
@@ -75,13 +81,14 @@ for (const stmt of ast.program.body) {
       if (d.id.type === 'Identifier' && d.init
           && (d.init.type === 'ArrowFunctionExpression' || d.init.type === 'FunctionExpression')
           && containsJsx(d.init)) {
-        components.push(d.id.name);
+        if (d.init.async) asyncComponents.push(d.id.name);
+        else components.push(d.id.name);
       }
     }
   }
 }
 
-const codegen = new Codegen(components);
+const codegen = new Codegen(components, asyncComponents);
 const compiled = codegen.generateProgram(ast);
 
 const runtime = fs.readFileSync(path.join(__dirname, '..', 'runtime', 'runtime.lua'), 'utf8');

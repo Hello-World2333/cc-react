@@ -98,6 +98,8 @@ function exprMayBeElement(node) {
 const MAPPED_FUNCS = {
   useState: '__useState',
   useEffect: '__useEffect',
+  fetch: '__fetch',
+  useRequest: '__useRequest',
 };
 
 /** JSX whitespace rule: text containing a newline gets its lines trimmed and
@@ -115,10 +117,14 @@ function jsxTextValue(node) {
 }
 
 export class Codegen {
-  /** @param {string[]} components top-level component function names (contain JSX) */
-  constructor(components) {
+  /** @param {string[]} components top-level component function names (contain JSX)
+   *  @param {string[]} asyncComponents top-level async functions containing JSX
+   *                                    (invalid as components; better error messages) */
+  constructor(components, asyncComponents) {
     this.components = new Set(components);
+    this.asyncComponents = new Set(asyncComponents || []);
     this.sawRender = false;
+    this.asyncVarSeq = 0; // unique continuation parameter names per async function
   }
 
   // ----------------------------------------------------------------
@@ -171,7 +177,7 @@ export class Codegen {
         for (const d of stmt.declarations) {
           if (d.id.type === 'Identifier' && d.init
               && (d.init.type === 'ArrowFunctionExpression' || d.init.type === 'FunctionExpression')
-              && containsJsx(d.init)) {
+              && containsJsx(d.init) && !d.init.async) {
             isComponentDecl = true;
           } else {
             decls.push(d);
@@ -181,7 +187,7 @@ export class Codegen {
           for (const d of stmt.declarations) {
             if (d.id.type === 'Identifier' && d.init
                 && (d.init.type === 'ArrowFunctionExpression' || d.init.type === 'FunctionExpression')
-                && containsJsx(d.init)) {
+                && containsJsx(d.init) && !d.init.async) {
               this.genArrowComponent(d, out);
             } else {
               throw new CodegenError(
@@ -205,6 +211,10 @@ export class Codegen {
               "render() must be called as render(<Component/>) with no props/children (MVP)");
           }
           const tag = arg.openingElement.name.name;
+          if (this.asyncComponents.has(tag)) {
+            throw new CodegenError(
+              `render(<${tag}/>) but ${tag} is an async function — components must render synchronously`);
+          }
           if (!this.components.has(tag)) {
             throw new CodegenError(`render(<${tag}/>) but ${tag} is not a component function`);
           }
@@ -236,16 +246,20 @@ export class Codegen {
     out.push('end');
   }
 
-  genFunctionDeclaration(node, out) {
+  genFunctionDeclaration(node, out, level = 0) {
     const name = node.id && node.id.name;
     if (!name) throw new CodegenError('anonymous top-level functions are not supported');
-    const isComponent = containsJsx(node);
+    const isComponent = containsJsx(node) && !node.async;
     const luaName = isComponent ? 'render_' + name : name;
     const { params, destructures } = this.genParams(node.params);
-    out.push(`local function ${luaName}(${params})`);
-    this.emitDestructures(destructures, out, 1);
-    this.genStatements(node.body.body, out, 1);
-    out.push('end');
+    this.line(out, level, `local function ${luaName}(${params})`);
+    this.emitDestructures(destructures, out, level + 1);
+    if (node.async) {
+      out.push(this.indent(this.genAsyncFnBody(node), level + 1));
+    } else {
+      this.genStatements(node.body.body, out, level + 1);
+    }
+    this.line(out, level, 'end');
   }
 
   // ----------------------------------------------------------------
@@ -288,6 +302,9 @@ export class Codegen {
       switch (stmt.type) {
         case 'VariableDeclaration':
           this.genVariableDeclaration(stmt, out, level);
+          break;
+        case 'FunctionDeclaration':
+          this.genFunctionDeclaration(stmt, out, level);
           break;
         case 'ReturnStatement': {
           const arg = stmt.argument ? this.genExpr(stmt.argument) : '';
@@ -340,33 +357,311 @@ export class Codegen {
 
   genVariableDeclaration(node, out, level) {
     for (const decl of node.declarations) {
-      const init = decl.init ? this.genExpr(decl.init) : 'nil';
-      const pattern = decl.id;
-      if (pattern.type === 'Identifier') {
-        this.line(out, level, `local ${ident(pattern.name)} = ${init}`);
-      } else if (pattern.type === 'ArrayPattern') {
-        const names = pattern.elements.map((el) => {
-          if (!el) return '_';
-          if (el.type === 'Identifier') return ident(el.name);
-          throw new CodegenError('array destructuring only supports identifiers');
-        });
-        this.line(out, level, `local ${names.join(', ')} = ${init}`);
-      } else if (pattern.type === 'ObjectPattern') {
-        for (const prop of pattern.properties) {
-          if (prop.type !== 'ObjectProperty' || prop.value.type !== 'Identifier') {
-            throw new CodegenError('object destructuring only supports simple { key }');
-          }
-          const key = this.objectKey(prop.key);
-          this.line(out, level, `local ${ident(prop.value.name)} = ${init}.${key}`);
+      this.genVarDeclarator(decl, out, level);
+    }
+  }
+
+  /** Emit one `local ... = init` declarator. */
+  genVarDeclarator(decl, out, level) {
+    const init = decl.init ? this.genExpr(decl.init) : 'nil';
+    this.genVarDeclaratorWithInit(decl, init, out, level);
+  }
+
+  /** Emit one declarator with a pre-generated init expression string. */
+  genVarDeclaratorWithInit(decl, init, out, level) {
+    const pattern = decl.id;
+    if (pattern.type === 'Identifier') {
+      this.line(out, level, `local ${ident(pattern.name)} = ${init}`);
+    } else if (pattern.type === 'ArrayPattern') {
+      const names = pattern.elements.map((el) => {
+        if (!el) return '_';
+        if (el.type === 'Identifier') return ident(el.name);
+        throw new CodegenError('array destructuring only supports identifiers');
+      });
+      this.line(out, level, `local ${names.join(', ')} = ${init}`);
+    } else if (pattern.type === 'ObjectPattern') {
+      for (const prop of pattern.properties) {
+        if (prop.type !== 'ObjectProperty' || prop.value.type !== 'Identifier') {
+          throw new CodegenError('object destructuring only supports simple { key }');
         }
-      } else {
-        throw new CodegenError('unsupported variable pattern: ' + pattern.type);
+        const key = this.objectKey(prop.key);
+        this.line(out, level, `local ${ident(prop.value.name)} = ${init}.${key}`);
       }
+    } else {
+      throw new CodegenError('unsupported variable pattern: ' + pattern.type);
     }
   }
 
   line(out, level, text) {
     out.push('  '.repeat(level) + text);
+  }
+
+  /** Indent every line of a multi-line Lua string by `level` steps. */
+  indent(text, level) {
+    const pad = '  '.repeat(level);
+    return text
+      .split('\n')
+      .map((l) => (l === '' ? '' : pad + l))
+      .join('\n');
+  }
+
+  // ----------------------------------------------------------------
+  // Async functions (milestone 3): `await` → event-driven continuations
+  // ----------------------------------------------------------------
+  //
+  // An async function runs synchronously until its first `await`, then
+  // registers a continuation closure with the awaited future (__await) and
+  // returns its own future (__newFuture, resolved with the function's return
+  // value). The continuation contains everything after the await — including
+  // further awaits, which recursively register their own continuations — so
+  // no native Lua coroutine is ever created.
+  //
+  // v1 scope (documented in README): one `await` per statement, at statement
+  // level (variable declaration init, assignment/expression, return) — not
+  // inside if/else branches, and not inside loops (loops are unsupported in
+  // the codegen generally). Nested async functions are self-contained.
+
+  /** Does this node (or subtree) contain an await? Nested async functions are
+   *  self-contained (their awaits belong to them), so they are not descended. */
+  containsAwait(node) {
+    if (!node || typeof node !== 'object') return false;
+    if (node.type === 'AwaitExpression') return true;
+    if ((node.type === 'FunctionDeclaration' || node.type === 'ArrowFunctionExpression'
+         || node.type === 'FunctionExpression') && node.async) return false;
+    if (Array.isArray(node)) return node.some((n) => this.containsAwait(n));
+    for (const key of Object.keys(node)) {
+      if (key === 'loc' || key === 'start' || key === 'end') continue;
+      if (this.containsAwait(node[key])) return true;
+    }
+    return false;
+  }
+
+  /** The single AwaitExpression in a subtree; errors on 0 or 2+ awaits. */
+  findSingleAwait(node, count = { n: 0 }) {
+    if (!node || typeof node !== 'object') return null;
+    if (node.type === 'AwaitExpression') {
+      count.n += 1;
+      return node;
+    }
+    if ((node.type === 'FunctionDeclaration' || node.type === 'ArrowFunctionExpression'
+         || node.type === 'FunctionExpression') && node.async) return null;
+    if (Array.isArray(node)) {
+      let found = null;
+      for (const c of node) {
+        const r = this.findSingleAwait(c, count);
+        if (r) found = r;
+      }
+      return found;
+    }
+    for (const key of Object.keys(node)) {
+      if (key === 'loc' || key === 'start' || key === 'end') continue;
+      const r = this.findSingleAwait(node[key], count);
+      if (r) return r;
+    }
+    return null;
+  }
+
+  /** Copy a node subtree with the await expression replaced by a parameter
+   *  identifier (the value the continuation receives). */
+  replaceAwait(node, param) {
+    if (!node || typeof node !== 'object') return node;
+    if (node.type === 'AwaitExpression') return { type: 'Identifier', name: param };
+    if ((node.type === 'FunctionDeclaration' || node.type === 'ArrowFunctionExpression'
+         || node.type === 'FunctionExpression') && node.async) return node;
+    const clone = { ...node };
+    for (const key of Object.keys(node)) {
+      if (key === 'loc' || key === 'start' || key === 'end') continue;
+      const v = node[key];
+      if (Array.isArray(v)) clone[key] = v.map((c) => this.replaceAwait(c, param));
+      else if (v && typeof v === 'object') clone[key] = this.replaceAwait(v, param);
+    }
+    return clone;
+  }
+
+  /** The async function body: create the invocation future, then lower the
+   *  body statements (or resolve immediately for an expression body). */
+  genAsyncFnBody(node) {
+    const body = [];
+    this.asyncVarSeq = 0;
+    body.push('local __self = __newFuture()');
+    if (node.body.type === 'BlockStatement') {
+      this.genAsyncStmts(node.body.body, body, 1, false);
+    } else {
+      body.push('  __resolveFuture(__self, ' + this.genExpr(node.body) + ')');
+    }
+    return body.join('\n');
+  }
+
+  /** Lower a statement list inside an async body. Statements before the first
+   *  await run here; the await statement registers a continuation that runs
+   *  the rest of the list (recursively lowered). A list that completes without
+   *  an await finishes the async body: the invocation future is resolved. */
+  genAsyncStmts(stmts, out, level, inCont) {
+    // Bare blocks don't create Lua scopes in this codegen — splice their
+    // statements so an await inside one is handled like a direct statement.
+    const flat = [];
+    for (const s of stmts) {
+      if (s.type === 'BlockStatement') flat.push(...s.body);
+      else flat.push(s);
+    }
+    let awIdx = -1;
+    for (let i = 0; i < flat.length; i++) {
+      if (this.containsAwait(flat[i])) { awIdx = i; break; }
+    }
+    if (awIdx >= 0) {
+      for (let j = 0; j < awIdx; j++) {
+        this.genAsyncStmt(flat[j], out, level, inCont);
+      }
+      this.genAwaitStmt(flat[awIdx], flat.slice(awIdx + 1), out, level, inCont);
+      return;
+    }
+    // No await in this list: emit everything; a trailing return already
+    // resolved the future, otherwise the async body completes here.
+    let lastWasReturn = false;
+    for (const s of flat) {
+      lastWasReturn = this.genAsyncStmt(s, out, level, inCont);
+    }
+    if (!lastWasReturn) {
+      this.line(out, level, '__resolveFuture(__self, nil)');
+    }
+  }
+
+  /** One statement in an async body. Returns true when the statement ends the
+   *  current scope with a return (so the caller can skip the resolve epilogue
+   *  that would be dead code after it). */
+  genAsyncStmt(stmt, out, level, inCont) {
+    switch (stmt.type) {
+      case 'VariableDeclaration':
+        this.genVariableDeclaration(stmt, out, level);
+        return false;
+      case 'ReturnStatement': {
+        const arg = stmt.argument ? this.genExpr(stmt.argument) : 'nil';
+        this.line(out, level, `__resolveFuture(__self, ${arg})`);
+        this.line(out, level, inCont ? 'return' : 'return __self');
+        return true;
+      }
+      case 'ExpressionStatement':
+        this.line(out, level, this.genExpr(stmt.expression));
+        return false;
+      case 'IfStatement':
+        this.genIfAsync(stmt, out, level, inCont);
+        return false;
+      case 'BlockStatement':
+        for (const s of stmt.body) this.genAsyncStmt(s, out, level, inCont);
+        return false;
+      case 'EmptyStatement':
+        return false;
+      default:
+        throw new CodegenError('unsupported statement in async function: ' + stmt.type);
+    }
+  }
+
+  /** if/else inside an async body: branches may contain returns (which must
+   *  resolve the invocation future) but not awaits (v1 limitation). */
+  genIfAsync(node, out, level, inCont) {
+    const test = this.genExpr(node.test);
+    this.line(out, level, `if ${test} then`);
+    this.genAsyncBlock(node.consequent, out, level + 1, inCont);
+    let cur = node.alternate;
+    while (cur && cur.type === 'IfStatement') {
+      this.line(out, level, `elseif ${this.genExpr(cur.test)} then`);
+      this.genAsyncBlock(cur.consequent, out, level + 1, inCont);
+      cur = cur.alternate;
+    }
+    if (cur) {
+      this.line(out, level, 'else');
+      this.genAsyncBlock(cur, out, level + 1, inCont);
+    }
+    this.line(out, level, 'end');
+  }
+
+  genAsyncBlock(stmt, out, level, inCont) {
+    if (stmt.type === 'BlockStatement') {
+      for (const s of stmt.body) this.genAsyncStmt(s, out, level, inCont);
+    } else {
+      this.genAsyncStmt(stmt, out, level, inCont);
+    }
+  }
+
+  /** Lower the statement that contains the (single) await: evaluate the
+   *  awaited expression, register the continuation (everything after the
+   *  await, recursively lowered), and — in the function body (not inside a
+   *  continuation) — return the invocation future. */
+  genAwaitStmt(stmt, rest, out, level, inCont) {
+    const param = '__v' + (++this.asyncVarSeq);
+    const open = (operandExpr, pname) => {
+      this.line(out, level, `__await(${operandExpr}, function(${pname})`);
+    };
+    const close = () => {
+      this.line(out, level, 'end)');
+      if (!inCont) this.line(out, level, 'return __self');
+    };
+
+    if (stmt.type === 'VariableDeclaration') {
+      // `const x = await E;` — declarators before the awaited one run here;
+      // the awaited binding (and any declarators after it) live in the
+      // continuation.
+      let awIdx = -1;
+      for (let k = 0; k < stmt.declarations.length; k++) {
+        if (this.containsAwait(stmt.declarations[k])) { awIdx = k; break; }
+      }
+      for (let k = 0; k < awIdx; k++) this.genVarDeclarator(stmt.declarations[k], out, level);
+      const d = stmt.declarations[awIdx];
+      const aw = this.findSingleAwait(d.init);
+      if (aw == null || aw.n > 1) {
+        throw new CodegenError('multiple awaits in one statement are not supported (split them)');
+      }
+      const operand = this.genExpr(aw.argument);
+      if (d.init.type === 'AwaitExpression' && d.id.type === 'Identifier') {
+        // `const x = await E` — the continuation parameter IS x.
+        open(operand, ident(d.id.name));
+        for (let k = awIdx + 1; k < stmt.declarations.length; k++) {
+          this.genVarDeclarator(stmt.declarations[k], out, level + 1);
+        }
+        this.genAsyncStmts(rest, out, level + 1, true);
+        close();
+      } else {
+        // await nested in the init (or destructuring pattern): a temp
+        // parameter, then the declarator is re-emitted with the value
+        // substituted.
+        open(operand, param);
+        this.genVarDeclaratorWithInit(d, this.replaceAwait(d.init, param), out, level + 1);
+        for (let k = awIdx + 1; k < stmt.declarations.length; k++) {
+          this.genVarDeclarator(stmt.declarations[k], out, level + 1);
+        }
+        this.genAsyncStmts(rest, out, level + 1, true);
+        close();
+      }
+      return;
+    }
+
+    if (stmt.type === 'ExpressionStatement') {
+      const aw = this.findSingleAwait(stmt.expression);
+      if (aw == null || aw.n > 1) {
+        throw new CodegenError('multiple awaits in one statement are not supported (split them)');
+      }
+      open(this.genExpr(aw.argument));
+      this.line(out, level + 1, this.genExpr(this.replaceAwait(stmt.expression, param)));
+      this.genAsyncStmts(rest, out, level + 1, true);
+      close();
+      return;
+    }
+
+    if (stmt.type === 'ReturnStatement') {
+      const aw = this.findSingleAwait(stmt.argument);
+      if (aw == null || aw.n > 1) {
+        throw new CodegenError('multiple awaits in one statement are not supported (split them)');
+      }
+      open(this.genExpr(aw.argument));
+      this.line(out, level + 1,
+        `__resolveFuture(__self, ${this.genExpr(this.replaceAwait(stmt.argument, param))})`);
+      this.line(out, level + 1, 'return');
+      close();
+      return;
+    }
+
+    throw new CodegenError(
+      'await inside an if/else branch is not supported yet (move the await above the branch)');
   }
 
   // ----------------------------------------------------------------
@@ -414,6 +709,8 @@ export class Codegen {
         return this.genJsxFragment(node);
       case 'ParenthesizedExpression':
         return this.genExpr(node.expression);
+      case 'AwaitExpression':
+        throw new CodegenError('await is only supported at statement level inside an async function body');
       case 'TSAsExpression':
       case 'TSTypeAssertion':
       case 'TSNonNullExpression':
@@ -604,17 +901,16 @@ export class Codegen {
   genFunction(node) {
     const { params, destructures } = this.genParams(node.params);
     const body = [];
-    if (node.body.type === 'BlockStatement') {
-      body.push(`function(${params})`);
-      this.emitDestructures(destructures, body, 1);
+    body.push(`function(${params})`);
+    this.emitDestructures(destructures, body, 1);
+    if (node.async) {
+      body.push(this.indent(this.genAsyncFnBody(node), 1));
+    } else if (node.body.type === 'BlockStatement') {
       this.genStatements(node.body.body, body, 1);
-      body.push('end');
     } else {
-      body.push(`function(${params})`);
-      this.emitDestructures(destructures, body, 1);
       body.push('  return ' + this.genExpr(node.body));
-      body.push('end');
     }
+    body.push('end');
     return body.join('\n');
   }
 

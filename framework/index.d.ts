@@ -29,6 +29,74 @@ declare var useEffect: (effect: () => void, deps?: readonly unknown[]) => void;
 // eslint-disable-next-line no-var
 declare var render: (element: JSX.Element) => void;
 
+/**
+ * A runtime "future" — an async operation the UI can `await`. Typed as
+ * PromiseLike only so TypeScript unwraps `await` to the response type; the
+ * Lua runtime resolves it via an event-driven continuation (no native
+ * promise / coroutine).
+ */
+type Future<T> = PromiseLike<T>;
+
+interface FetchOptions {
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | string;
+  headers?: Record<string, string>;
+  /** A plain object body is JSON-encoded and sent as application/json. */
+  body?: string | Record<string, unknown>;
+}
+
+/**
+ * HTTP response (docs/lib http client). `ok` is true for 2xx; failures
+ * (network error / DNS / timeout / not configured) resolve with
+ * `{ ok: false, error: <message> }` so `await` code can branch on resp.ok
+ * without try/catch (await try/catch is not compiled yet).
+ */
+interface Response {
+  ok: boolean;
+  status?: number;
+  statusText?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  error?: string;
+  text(): string;
+  json(): any;
+}
+
+/** Three-state data-fetch hook state. `data` is the resolved response. */
+interface RequestState<T> {
+  data: T | null;
+  loading: boolean;
+  error: string | null;
+  /** Re-run the fetcher immediately (even when deps are unchanged). */
+  refetch: () => void;
+}
+
+/**
+ * Fetch data from the network. Runs in the background (the networkLoop
+ * task, composed by the main program) so the UI never blocks; returns a
+ * future to `await`:
+ *
+ *   async function load() {
+ *     const resp = await fetch('http://192.168.1.50:8080/hello');
+ *     if (resp.ok) setData(resp.body); else setError(resp.error);
+ *   }
+ */
+// eslint-disable-next-line no-var
+declare var fetch: (url: string, options?: FetchOptions) => Future<Response>;
+
+/**
+ * Data-fetch hook with loading/data/error states. Fetches on mount and
+ * whenever deps change; stale responses (an older request resolving after a
+ * newer one started) are ignored. `fetcher` must return a future:
+ *
+ *   const req = useRequest(() => fetch(URL));
+ *   // req.loading / req.data / req.error / req.refetch()
+ */
+// eslint-disable-next-line no-var
+declare var useRequest: <T = Response>(
+  fetcher: () => Future<T>,
+  deps?: readonly unknown[],
+) => RequestState<T>;
+
 declare var Box: (props: JSX.BoxProps) => JSX.Element;
 declare var Panel: (props: JSX.BoxProps) => JSX.Element;
 declare var Text: (props: JSX.TextProps) => JSX.Element;

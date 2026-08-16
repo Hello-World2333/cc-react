@@ -57,6 +57,7 @@ end
 
 t.stub = {
   steps = {},            -- step script (eventFn / snapshot)
+  queue = {},            -- os.queueEvent'd events (drained before the steps)
   buf = nil,             -- buf[y][x], 0-based ARGB pixels
   synced = 0,
   calls = {},            -- recorded GPU calls (for dirty-rect assertions)
@@ -173,10 +174,17 @@ _G.peripheral = {
   end,
 }
 
--- Main-coroutine event source: consumes one step-script entry. Runs a
--- snapshot inline, or evaluates an eventFn and returns its tuple. Throws
--- __TEST_END__ when the script drains.
+-- Main-coroutine event source: consumes one step-script entry. os.queueEvent
+-- events (e.g. the network bridge's job/completion notifications between the
+-- UI task and the network worker task) are drained FIRST, so a chain of
+-- queued events resolves before the next scripted step runs. Runs a snapshot
+-- inline, or evaluates an eventFn and returns its tuple. Throws __TEST_END__
+-- when the script drains.
 local function pullEventDirect()
+  if #t.stub.queue > 0 then
+    local ev = table.remove(t.stub.queue, 1)
+    return ev[1], ev[2], ev[3], ev[4], ev[5], ev[6]
+  end
   if #t.stub.steps == 0 then
     error("__TEST_END__", 0)
   end
@@ -207,6 +215,11 @@ _G.os = {
   -- enough for the step-script (tests feed {"timer", 1} to tick the blink)
   startTimer = function() return 1 end,
   cancelTimer = function() end,
+  -- the network bridge (fetch) signals the worker task and reports results
+  -- through queued events; pullEventDirect drains them before the step script
+  queueEvent = function(name, ...)
+    t.stub.queue[#t.stub.queue + 1] = { name, ... }
+  end,
 }
 -- CC global; the runtime no longer sleeps at startup (refreshSize is
 -- blocking), but keep a stub in case any future code path calls it.
@@ -259,8 +272,11 @@ t.uiMod = nil
 -- Load the compiled module, then run its start() — either standalone or as
 -- one task of parallel.waitForAll (when extraTask is given). The step script
 -- drives it until it drains (the event source throws __TEST_END__).
-function t.boot(steps, extraTask)
+-- preStart(t.uiMod) runs after the module loads and before start() — used by
+-- the network tests to install a stubbed backend before the first fetch.
+function t.boot(steps, extraTask, preStart)
   t.stub.steps = steps or {}
+  t.stub.queue = {}
   t.stub.buf = makeBuffer()
   t.stub.synced = 0
   t.stub.calls = {}
@@ -274,6 +290,7 @@ function t.boot(steps, extraTask)
     error("test harness: " .. t.MAIN .. " does not return a module with a start() function")
   end
   t.uiMod = res
+  if preStart then preStart(t.uiMod) end
   local run = function()
     if extraTask then
       _G.parallel.waitForAll(function() t.uiMod.start("left") end, extraTask)
