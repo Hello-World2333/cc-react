@@ -17,10 +17,10 @@
 import { ACCENT, DIM, FAINT } from '../lib/theme';
 import { shortError } from '../lib/format';
 
-const URL_HELLO = 'http://192.168.1.50:8080/hello';
-const URL_TWO = 'http://192.168.1.50:8080/quote';
-const URL_FAIL = 'http://192.168.1.50:8080/fail';
-const URL_REQ = 'http://192.168.1.50:8080/status';
+const URL_HELLO = 'http://192.168.1.4/hello';
+const URL_TWO = 'http://192.168.1.4/quote';
+const URL_FAIL = 'http://192.168.1.4/fail';
+const URL_REQ = 'http://192.168.1.4/status';
 
 export function NetworkTab() {
   const [status, setStatus] = useState('press a button');
