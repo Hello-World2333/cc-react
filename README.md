@@ -54,22 +54,26 @@ lib/        ← simpleParallel.lua + 网络栈（docs/lib；simpleParallel 来�
 lua main.lua left
 ```
 
-`left` 是 GPU 外设所在的 side（默认 `left`）。主程序里就是简单的任务组合：
+`left` 是 GPU 外设所在的 side（默认 `left`）。主程序里就是简单的任务组合 —— **网络客户端由主程序
+构建**（它拥有 IP 栈配置），实例传给 UI 模块，`networkLoop()` 作为 fetch 的 worker 任务：
 
 ```lua
 local simpleParallel = require("lib.simpleParallel")
 local ui = require("ui")
 
--- 网络（里程碑 3）：配置 IP 栈（必须在 simpleParallel.start() 之前——栈自身的
--- ARP/DNS 收包任务在构造时注册），然后 networkLoop() 作为 fetch 的 worker 任务。
--- 没有网卡时 configureNetwork 记录错误，应用里的 fetch 会把错误显示在屏幕上。
-ui.configureNetwork({
+-- 网络（里程碑 3）：主程序用 docs/lib 构建 HTTP client（IP 栈 + 可选 DNS），
+-- 传给 ui.setHttpClient()。client 必须在 simpleParallel.start() 之前构建
+-- （栈自身的 ARP/DNS 收包任务在构造时注册）。没有网卡时构建失败，应用里的
+-- fetch 会把错误显示在屏幕上。
+local IP = require("lib.ip")
+local HTTP = require("lib.http")
+local ipIface = IP.new({
+  mode = "host",
   interfaces = {
     { side = "back", channel = 1, ip = "192.168.1.10", mask = "255.255.255.0", gateway = "192.168.1.1" },
   },
-  dns = "8.8.8.8",   -- 可选：fetch URL 用域名时需要
-  timeout = 10,      -- HTTP 超时（秒）
 })
+ui.setHttpClient(HTTP.newClient(ipIface, { dnsServer = "8.8.8.8", timeout = 10 }))
 
 simpleParallel.add(function() ui.start("left") end)   -- UI 任务
 simpleParallel.add(function() ui.networkLoop() end)   -- fetch worker（网络任务）
@@ -213,9 +217,10 @@ const req = useRequest(() => fetch('http://192.168.1.50:8080/quote'));
 <Text>{req.loading ? 'loading…' : req.error ? req.error : req.data.body}</Text>
 ```
 
-部署时主程序要配置网络栈并注册 worker（见「部署」）：`ui.configureNetwork({...})` +
-`simpleParallel.add(function() ui.networkLoop() end)`。`fetch` 的响应是 docs/lib 的 HTTP 响应
-（`ok / status / statusText / headers / body`，`text()` / `json()`）；JSON body 用 `resp.json()`。
+部署时主程序要构建网络客户端并注册 worker（见「部署」）：`ui.setHttpClient(client)`（docs/lib 的
+HTTP client 实例，由主程序构建）+ `simpleParallel.add(function() ui.networkLoop() end)`。`fetch` 的
+响应是 docs/lib 的 HTTP 响应（`ok / status / statusText / headers / body`，`text()` / `json()`）；
+JSON body 用 `resp.json()`。
 
 ### 支持范围（MVP）
 
@@ -242,8 +247,8 @@ const req = useRequest(() => fetch('http://192.168.1.50:8080/quote'));
 - 网络（里程碑 3）：`async function` / `async () =>` 编译为事件驱动状态机（`await` → 续体闭包链，
   无原生协程）；`fetch(url, options)` 返回 future（请求在 `networkLoop()` 后台任务执行；
   失败解析为 `{ ok = false, error }`）；`useRequest(fetcher, deps)` 三态 hook（loading/data/error +
-  refetch，含过期响应丢弃）；`await` 非 future 值按 JS 语义透传；主程序用
-  `ui.configureNetwork(...)` + `simpleParallel.add(ui.networkLoop)` 接线（见「网络」与「部署」）
+  refetch，含过期响应丢弃）；`await` 非 future 值按 JS 语义透传；主程序构建 docs/lib HTTP client
+  并用 `ui.setHttpClient(client)` + `simpleParallel.add(ui.networkLoop)` 接线（见「网络」与「部署」）
 
 ## 故障排查：真机黑屏（已修复 2025-08）
 
@@ -295,7 +300,8 @@ const req = useRequest(() => fetch('http://192.168.1.50:8080/quote'));
     循环/switch 本就不在 codegen 支持范围。多级**顺序** await 支持。
   - `await` 的 try/catch 未编译：错误处理用 `resp.ok` / `resp.error` 分支。
   - async 组件（含 JSX 的 async 函数）编译期报错——组件必须同步返回元素。
-  - `fetch` 需要主程序配置网络（`ui.configureNetwork`）+ 注册 `networkLoop()` 任务；
-    未配置时 fetch 解析为 `{ ok = false, error = "network not configured: ..." }`。
+  - `fetch` 需要主程序构建 docs/lib HTTP client 并传入（`ui.setHttpClient(client)`）+
+    注册 `networkLoop()` 任务；未传入时 fetch 解析为
+    `{ ok = false, error = "http client not set: ..." }`。
   - 网络栈（`docs/lib`）的 IP/ARP/DNS 任务必须在 `simpleParallel.start()` 前构造
-    （`configureNetwork` 在 start 前调用即可）；`fetch` 只支持 `http://`（docs/lib 现状）。
+    （主程序构建 client 时即完成）；`fetch` 只支持 `http://`（docs/lib 现状）。

@@ -312,11 +312,13 @@ MVP 已按本文档落地，代码布局见仓库根目录 README。与本文档
     （状态更新走正常脏矩形重绘）。作业队列每唤醒必排空，worker 在阻塞 fetch 期间错过唤醒事件也
     不会丢作业。错误（连接失败/DNS/未配置）统一归一化为 `{ ok = false, error = msg }` 响应表，
     事件载荷**绝不携带 nil 参数**（nil 会在事件表里留空洞，调度器 unpack 会丢后续参数）。
-  - **网络栈配置**：主程序在 `simpleParallel.start()` **之前**调用
-    `ui.configureNetwork({ interfaces = { { side, channel, ip, mask, gateway } }, dns, timeout })`
-    ——IP 栈（`lib.ip` 的 ARP/DNS 收包任务）必须在 start 前注册；配置失败（如没有网卡）记录错误，
-    由后续 fetch 上报而非崩溃。未配置时 fetch 解析为 `{ ok = false, error = "network not
-    configured: ..." }`。
+  - **网络客户端注入**：**HTTP client 实例由主程序构建并传入**（框架不拼 IP 栈——网络配置属于
+    部署环境）。主程序在 `simpleParallel.start()` **之前**用 `docs/lib` 构建 client
+    （`IP.new({ mode="host", interfaces = {...} })` → `HTTP.newClient(ipIface, { dnsServer, timeout })`），
+    然后 `ui.setHttpClient(client)` —— IP 栈（`lib.ip` 的 ARP/DNS 收包任务）在构造时注册，必须
+    早于 start；client 构建失败（如没有网卡）由主程序自行处理（demo 用 pcall 包住，让应用继续
+    运行、fetch 上报错误）。未传入时 fetch 解析为
+    `{ ok = false, error = "http client not set: ..." }`。
   - **useRequest（运行时 hook）**：`useRequest(fetcher, deps)` 管理 data/loading/error + token
     四槽位：挂载与 deps 变化时触发请求；`refetch()` 立即重发；token 机制丢弃过期响应（新请求已
     发起时旧续体直接返回，不会用旧数据覆盖新数据）。返回 `{ data, loading, error, refetch }`。

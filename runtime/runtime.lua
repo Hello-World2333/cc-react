@@ -19,7 +19,7 @@
 
           local simpleParallel = require("lib.simpleParallel")
           local ui = require("ui")
-          ui.configureNetwork({ interfaces = { ... } }) -- optional (fetch)
+          ui.setHttpClient(client) -- optional (fetch): docs/lib HTTP client
           simpleParallel.add(function() ui.start("left") end)
           simpleParallel.add(function() ui.networkLoop() end) -- fetch worker
           simpleParallel.start()
@@ -810,15 +810,16 @@ end
 -- fetch() queues a job for the network worker task and returns a future the
 -- UI awaits. The worker (networkLoop) runs the blocking HTTP client — the
 -- stack in docs/lib — inside a simpleParallel coroutine, so requests never
--- freeze the UI. The main program wires it up before simpleParallel.start():
+-- freeze the UI. The MAIN PROGRAM builds the client (it owns the IP stack /
+-- network config) and hands the instance to the module before start():
 --
---   local ui = require("ui")
---   ui.configureNetwork({
---     interfaces = { { side = "back", channel = 1, ip = "192.168.1.10",
---                      mask = "255.255.255.0", gateway = "192.168.1.1" } },
---     dns = "8.8.8.8",   -- optional DNS server (hostnames in fetch URLs)
---     timeout = 10,      -- HTTP timeout, seconds (default 10)
---   })
+--   local IP = require("lib.ip")
+--   local HTTP = require("lib.http")
+--   local ipIface = IP.new({ mode = "host", interfaces = {
+--     { side = "back", channel = 1, ip = "192.168.1.10",
+--       mask = "255.255.255.0", gateway = "192.168.1.1" } } })
+--   local client = HTTP.newClient(ipIface, { timeout = 10, dnsServer = "8.8.8.8" })
+--   ui.setHttpClient(client)
 --   simpleParallel.add(function() ui.start("left") end)
 --   simpleParallel.add(function() ui.networkLoop() end)
 --   simpleParallel.start()
@@ -831,9 +832,7 @@ end
 local __netJobs = {}      -- pending fetch jobs: { id, url, options }
 local __netPending = {}   -- job id -> future
 local __netSeq = 0
-local __netClient = nil   -- lazy-built HTTP client (docs/lib http)
-local __netInitError = nil
-local __netConfig = nil
+local __netClient = nil   -- docs/lib HTTP client (set by the main program)
 local __netBackend = nil  -- test hook: replaces the real HTTP client
 local __netDeferred = {}  -- id -> job whose backend asked to defer
 
@@ -847,34 +846,11 @@ local function __fetch(url, options)
   return f
 end
 
--- Build the docs/lib HTTP client on the configured IP stack. Must run BEFORE
--- simpleParallel.start(): the stack registers its own worker tasks (ARP/DNS
--- receive loops) at construction time. Failures are recorded and reported by
--- the next fetch instead of crashing the main program.
-local function __netInit()
-  if __netClient ~= nil or __netInitError ~= nil then return end
-  if __netConfig == nil then
-    __netInitError = "network not configured: call ui.configureNetwork(...) before simpleParallel.start()"
-    return
-  end
-  local ok, res = pcall(function()
-    local IP = require("lib.ip")
-    local HTTP = require("lib.http")
-    local ipIface = IP.new({ mode = "host", interfaces = __netConfig.interfaces or {} })
-    local cfg = { timeout = __netConfig.timeout or 10 }
-    if __netConfig.dns then cfg.dnsServer = __netConfig.dns end
-    return HTTP.newClient(ipIface, cfg)
-  end)
-  if ok then
-    __netClient = res
-  else
-    __netInitError = tostring(res)
-  end
-end
-
-local function __configureNetwork(config)
-  __netConfig = config or {}
-  __netInit()
+-- Hand the HTTP client to the worker. The client must be built by the main
+-- program BEFORE simpleParallel.start() (docs/lib stack tasks — ARP/DNS
+-- receive loops — register at construction time). Passing nil clears it.
+local function __setHttpClient(client)
+  __netClient = client
 end
 
 -- Perform one fetch job. Runs inside the network worker task, so the
@@ -893,9 +869,9 @@ local function __netFetchOne(job)
     end
     return resp, err
   end
-  if __netInitError == nil and __netClient == nil then __netInit() end
-  if __netInitError then return nil, __netInitError end
-  if __netClient == nil then return nil, "network not configured" end
+  if __netClient == nil then
+    return nil, "http client not set: call ui.setHttpClient(client) from the main program"
+  end
   return __netClient:fetch(job.url, job.options)
 end
 
@@ -1867,9 +1843,10 @@ ccreact = {
   -- entry points
   start = function(side) return __start(side) end,
   mount = function(rootFn) __mount(rootFn) end,
-  -- network (milestone 3): the main program configures the stack and adds
+  -- network (milestone 3): the main program builds the docs/lib HTTP client
+  -- (it owns the IP stack config), hands it to the module, and adds
   -- networkLoop() as a second simpleParallel task before simpleParallel.start()
-  configureNetwork = function(config) __configureNetwork(config) end,
+  setHttpClient = function(client) __setHttpClient(client) end,
   networkLoop = function() return __networkLoop() end,
   -- debug / test hooks
   setNetworkBackend = function(fn) __netBackend = fn end,

@@ -25,7 +25,7 @@ import { HistoryList } from './components/HistoryList';
 // networkLoop task) and the rest of the function runs when it resolves. The
 // main program configures the IP stack (ui.configureNetwork); without it the
 // fetch reports the error on screen instead of crashing.
-const DEMO_URL = 'http://192.168.1.50:8080/hello';
+const DEMO_URL = 'http://192.168.1.4/redstone';
 
 function App() {
   const [count, setCount] = useState(0);

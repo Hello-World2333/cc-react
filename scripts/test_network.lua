@@ -20,9 +20,9 @@
     4. useRequest: fetch on mount (loading → data), refetch, stale-response
        protection (an older response cannot clobber a newer one), and no
        re-fetch on an unrelated re-render
-    5. unconfigured network: without ui.configureNetwork, every fetch
-       resolves with { ok = false, error = "network not configured: ..." }
-       through the real default worker path (no backend stub)
+    5. no http client: without ui.setHttpClient, every fetch resolves with
+       { ok = false, error = "http client not set: ..." } through the real
+       default worker path (no backend stub)
 
   Usage: lua5.1 scripts/test_network.lua [path-to-module.lua]
 ]]
@@ -185,17 +185,17 @@ boot({
   end)
 end)
 
--- ================= scenario 5: unconfigured network =================
+-- ================= scenario 5: no http client =================
 
-print("== unconfigured network reports a clear error ==")
--- No backend, no configureNetwork: the worker's default path records the
--- missing config and every fetch resolves with { ok = false, error }.
+print("== no http client reports a clear error ==")
+-- No backend and no ui.setHttpClient: the worker's default path reports
+-- the missing client and every fetch resolves with { ok = false, error }.
 boot({
   {
     snapshot = function()
       local reqText = findText(t.uiMod.getTree(), "req:")
-      check(reqText.text:find("network not configured", 1, true) ~= nil,
-        "without configureNetwork, fetch resolves with a clear error (got: "
+      check(reqText.text:find("http client not set", 1, true) ~= nil,
+        "without setHttpClient, fetch resolves with a clear error (got: "
         .. reqText.text .. ")")
     end,
   },
