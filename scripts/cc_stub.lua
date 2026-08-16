@@ -231,6 +231,11 @@ _G.sleep = function() end
 -- task renders its first frame — before the first real event), then every
 -- pulled event is delivered to tasks whose filter (the value their
 -- os.pullEvent yielded) is nil or matches the event name.
+-- Events are pulled via osPullEvent (NOT pullEventDirect) so this stub is
+-- re-entrant: ui.start() internally composes its loops with another
+-- parallel.waitForAll, and when that nested scheduler runs inside a task
+-- coroutine its pullEvent yields to THIS scheduler instead of consuming the
+-- step script directly.
 _G.parallel = {
   waitForAll = function(...)
     local threads = {}
@@ -260,7 +265,7 @@ _G.parallel = {
         i = i + 1
       end
       if count == 0 then return end
-      event = { pullEventDirect() }
+      event = { osPullEvent() }
     end
   end,
 }

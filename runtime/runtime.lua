@@ -20,8 +20,7 @@
           local simpleParallel = require("lib.simpleParallel")
           local ui = require("ui")
           ui.setHttpClient(client) -- optional (fetch): docs/lib HTTP client
-          simpleParallel.add(function() ui.start("left") end)
-          simpleParallel.add(function() ui.networkLoop() end) -- fetch worker
+          simpleParallel.add(function() ui.start("left") end) -- UI + fetch worker
           simpleParallel.start()
 
       CC's parallel scheduler first resumes every task with an empty event, so
@@ -809,9 +808,10 @@ end
 -- ---- network bridge ------------------------------------------------------
 -- fetch() queues a job for the network worker task and returns a future the
 -- UI awaits. The worker (networkLoop) runs the blocking HTTP client — the
--- stack in docs/lib — inside a simpleParallel coroutine, so requests never
--- freeze the UI. The MAIN PROGRAM builds the client (it owns the IP stack /
--- network config) and hands the instance to the module before start():
+-- stack in docs/lib — inside its own coroutine (start() composes it via
+-- parallel.waitForAll), so requests never freeze the UI. The MAIN PROGRAM
+-- builds the client (it owns the IP stack / network config) and hands the
+-- instance to the module before start():
 --
 --   local IP = require("lib.ip")
 --   local HTTP = require("lib.http")
@@ -821,7 +821,6 @@ end
 --   local client = HTTP.newClient(ipIface, { timeout = 10, dnsServer = "8.8.8.8" })
 --   ui.setHttpClient(client)
 --   simpleParallel.add(function() ui.start("left") end)
---   simpleParallel.add(function() ui.networkLoop() end)
 --   simpleParallel.start()
 --
 -- A fetch resolves with a docs/lib HTTP response ({ ok, status, statusText,
@@ -1815,11 +1814,31 @@ local function __mount(rootFn)
   __rootFn = rootFn
 end
 
+-- The UI event loop: pulls every event, routes the ones it understands
+-- (tm_monitor_*, tm_keyboard_*, timers, network completions), then drains any
+-- queued re-renders. CC broadcasts every event to all consumers, so this
+-- loop filters its own and never steals from other tasks.
+local function __uiLoop()
+  while true do
+    local e = { os.pullEvent() }
+    local ok, err = pcall(__handleEvent, e)
+    if not ok then print("cc-react: event error: " .. tostring(err)) end
+    __drain()
+  end
+end
+
 -- The UI task body. This is the function a main program hands to
 -- simpleParallel (parallel.waitForAll), so the UI loop runs concurrently
--- with the rest of the program (future network stack tasks). CC broadcasts
--- every event to all consumers, so this loop sees all events and filters
--- its own (tm_monitor_*). Initialization is done here, not at load time.
+-- with the rest of the program (network stack tasks). Initialization is done
+-- here, not at load time.
+--
+-- start() ALSO composes the network worker loop (networkLoop) internally via
+-- parallel.waitForAll — the fetch worker needs its own coroutine (blocking
+-- HTTP yields on sockets), and nested waitForAll is exactly that scheduler.
+-- The main program still adds only ONE task:
+--
+--   simpleParallel.add(function() ui.start("left") end)
+--   simpleParallel.start()
 local function __start(side)
   if __rootFn == nil then
     error("cc-react: no component mounted — the module needs render(<App/>) at top level", 0)
@@ -1828,11 +1847,14 @@ local function __start(side)
   __viewportW, __viewportH = w, h
   __render()
   __drain()
-  while true do
-    local e = { os.pullEvent() }
-    local ok, err = pcall(__handleEvent, e)
-    if not ok then print("cc-react: event error: " .. tostring(err)) end
-    __drain()
+  if parallel and parallel.waitForAll then
+    parallel.waitForAll(
+      function() __uiLoop() end,
+      function() __networkLoop() end)
+  else
+    -- no parallel scheduler available: run the UI alone (fetch jobs stay
+    -- queued — the worker needs a scheduler to run)
+    __uiLoop()
   end
 end
 
@@ -1844,8 +1866,10 @@ ccreact = {
   start = function(side) return __start(side) end,
   mount = function(rootFn) __mount(rootFn) end,
   -- network (milestone 3): the main program builds the docs/lib HTTP client
-  -- (it owns the IP stack config), hands it to the module, and adds
-  -- networkLoop() as a second simpleParallel task before simpleParallel.start()
+  -- (it owns the IP stack config) and hands the instance to the module;
+  -- start() already runs the networkLoop worker internally. networkLoop() is
+  -- kept for advanced composition (e.g. running the worker under a different
+  -- scheduler) — do NOT add it as a separate task alongside start().
   setHttpClient = function(client) __setHttpClient(client) end,
   networkLoop = function() return __networkLoop() end,
   -- debug / test hooks

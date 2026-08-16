@@ -2,10 +2,11 @@
   Headless test for the network milestone (scripts/fixtures/network):
   async/await → event-driven state machine + the fetch bridge + useRequest.
 
-  Boots dist/fixture-network.lua with the networkLoop task as a second
-  simpleParallel task and a stubbed backend (ui.setNetworkBackend), so no
-  real TCP is involved — the same job/event flow the real docs/lib HTTP
-  client uses in-game:
+  Boots dist/fixture-network.lua with a stubbed backend
+  (ui.setNetworkBackend), so no real TCP is involved. start() internally
+  composes the UI loop and the networkLoop worker via parallel.waitForAll,
+  so the main program only adds one task — the same job/event flow the
+  real docs/lib HTTP client uses in-game:
 
     fetch()        → queues a job + "ccreact_net_job" event
     networkLoop()  → runs the job via the backend, queues "ccreact_net_done"
@@ -40,14 +41,6 @@ local clickButton = t.clickButton
 
 t.MAIN = arg and arg[1] or "dist/fixture-network.lua"
 
--- The network worker task, composed like the main program would:
--- simpleParallel.add(function() ui.networkLoop() end)
-local function networkTask()
-  return function()
-    t.uiMod.networkLoop()
-  end
-end
-
 local function okResp(body)
   return { ok = true, status = 200, statusText = "OK", body = body }
 end
@@ -73,7 +66,7 @@ boot({
         .. table.concat(callOrder, " -> ") .. ")")
     end,
   },
-}, networkTask(), function(ui)
+}, nil, function(ui)
   ui.setNetworkBackend(function(url, options)
     callOrder[#callOrder + 1] = url
     if url:find("/one", 1, true) then return okResp("first") end
@@ -95,7 +88,7 @@ boot({
         .. statusText.text .. ")")
     end,
   },
-}, networkTask(), function(ui)
+}, nil, function(ui)
   ui.setNetworkBackend(function(url, options)
     if url:find("/fail", 1, true) then return nil, "connection refused" end
     return okResp("x")
@@ -114,7 +107,7 @@ boot({
         .. plain.text .. ")")
     end,
   },
-}, networkTask(), function(ui)
+}, nil, function(ui)
   ui.setNetworkBackend(function(url, options)
     return okResp("x")
   end)
@@ -176,7 +169,7 @@ boot({
       check(cnt.text == "count: 1", "count updated (got: " .. cnt.text .. ")")
     end,
   },
-}, networkTask(), function(ui)
+}, nil, function(ui)
   ui.setNetworkBackend(function(url, options)
     if url:find("/req", 1, true) then
       return false -- defer: resolved manually via resolveNetworkJob
@@ -199,7 +192,7 @@ boot({
         .. reqText.text .. ")")
     end,
   },
-}, networkTask())
+})
 
 print("")
 if t.failures == 0 then

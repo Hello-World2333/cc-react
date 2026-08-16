@@ -146,8 +146,8 @@ MVP 框架包含：
 - 首版不接网络，纯本地 UI。**已实现（2025-08，里程碑 3）**，见附录「网络接入」。
 - 实现方案（已定）：**async 函数编译为事件驱动状态机**——`await` 之后的代码拆成续体（closure），
   由网络事件驱动继续执行；完全避开原生 Lua 协程陷阱，贴合 CC 事件模型。
-- 网络能力复用 `docs/lib`（`fetch` 等），在独立的 simpleParallel 任务（`networkLoop`）中执行，
-  不阻塞 UI 事件循环。
+- 网络能力复用 `docs/lib`（`fetch` 等），在独立协程（`ui.start()` 内部组合的 `networkLoop`
+  worker）中执行，不阻塞 UI 事件循环。
 - `useRequest`（loading / data / error 三态管理）已实现。
 
 ## 12. 显示环境
@@ -195,12 +195,14 @@ MVP 已按本文档落地，代码布局见仓库根目录 README。与本文档
   `tsc --noEmit` 已接入（`npm run typecheck`）。
 - **产物形态（2025-08 模块化）**：编译产物不再是独立程序。顶层 `render(<App/>)` 编译为
   `__mount(render_App)`（只登记根组件，require 时不碰 GPU）；模块返回的表含 `start(side)` 任务函数
-  —— GPU 初始化（阻塞 `refreshSize`，side 由主程序显式传入，默认 `left`）+ 首帧渲染 + `os.pullEvent`
-  事件循环。主程序经 simpleParallel 组合：`simpleParallel.add(function() ui.start("left") end)` +
-  网络任务 + `simpleParallel.start()`。CC 的 `parallel.waitForAll` 首轮以空事件 resume 每个任务
+  —— GPU 初始化（阻塞 `refreshSize`，side 由主程序显式传入，默认 `left`）+ 首帧渲染 +
+  `parallel.waitForAll`（UI 事件循环 + 网络 worker 循环，见附录「网络接入」）。主程序经
+  simpleParallel 组合：`simpleParallel.add(function() ui.start("left") end)` + 网络任务 +
+  `simpleParallel.start()`。CC 的 `parallel.waitForAll` 首轮以空事件 resume 每个任务
   （首帧在首个事件前渲染），随后每个事件广播给所有消费者（无争抢），UI 任务在 `os.pullEvent`
   处让出调度器，因此与网络栈任务并发、互不阻塞。测试桩按真机 `parallel.lua` 语义复刻了该调度
-  （`scripts/test_main.lua` 的 parallel stub + 双任务广播断言）。
+  （`scripts/test_main.lua` 的 parallel stub + 双任务广播断言；stub 的 waitForAll 经
+  `osPullEvent` 取事件，支持 `start` 内的嵌套 parallel）。
 - **组件模型**（§6）：`useState` / `useEffect` 编译到运行时 `__useState` / `__useEffect`；
   状态按「组件实例 DFS 路径 + hook 索引」存放，组件 fnId 变更时重置槽位（无 key 的 MVP 身份模型）。
   更新粒度 = 整树重跑 + 布局结果对比（§6 一致）。
@@ -305,10 +307,13 @@ MVP 已按本文档落地，代码布局见仓库根目录 README。与本文档
     编译报错（提示把 await 提到分支上方）；循环/switch 本来就不在 codegen 支持范围。嵌套 async
     函数自成一体（编译期不往下钻）。`await` 非 future 值按 JS 语义直接透传（`await 42` → 42）。
   - **fetch（运行时网络桥）**：`fetch(url, options)` 编译为 `__fetch`——登记一个作业并
-    `os.queueEvent("ccreact_net_job")` 唤醒网络 worker，返回 future。worker 是模块暴露的
-    `networkLoop()` 任务（主程序 `simpleParallel.add(function() ui.networkLoop() end)`），
-    阻塞式调用 `docs/lib` 的 HTTP client（在 simpleParallel 协程内可安全 sleep/收包），完成后
-    `os.queueEvent("ccreact_net_done", id, resp)`；UI 事件循环收到后解析 future，续体运行
+    `os.queueEvent("ccreact_net_job")` 唤醒网络 worker，返回 future。worker 是 `__networkLoop`
+    循环，**由 `ui.start()` 内部用 `parallel.waitForAll` 与 UI 循环组合**（嵌套 parallel 合法：
+    内层调度器在 UI 任务协程里 `os.pullEvent` 会让出给外层调度器），因此主程序**只需添加一个
+    任务** `simpleParallel.add(function() ui.start(side) end)` 即可同时跑 UI 与 fetch worker；
+    模块仍导出 `networkLoop()` 供高级组合（如脱离 `start` 单独调度），但不应与 `start` 同时添加。
+    worker 阻塞式调用 `docs/lib` 的 HTTP client（在 simpleParallel 协程内可安全 sleep/收包），
+    完成后 `os.queueEvent("ccreact_net_done", id, resp)`；UI 事件循环收到后解析 future，续体运行
     （状态更新走正常脏矩形重绘）。作业队列每唤醒必排空，worker 在阻塞 fetch 期间错过唤醒事件也
     不会丢作业。错误（连接失败/DNS/未配置）统一归一化为 `{ ok = false, error = msg }` 响应表，
     事件载荷**绝不携带 nil 参数**（nil 会在事件表里留空洞，调度器 unpack 会丢后续参数）。
@@ -324,9 +329,10 @@ MVP 已按本文档落地，代码布局见仓库根目录 README。与本文档
     发起时旧续体直接返回，不会用旧数据覆盖新数据）。返回 `{ data, loading, error, refetch }`。
   - **验证**：新增 `scripts/fixtures/network/`（顺序 await 值流、错误路径、await 非 future、
     useRequest 挂载/加载/refetch/过期保护/无关重渲染不重发）与 `scripts/test_network.lua`
-    （无头测试：`networkLoop` 作为 parallel 第二任务 + `ui.setNetworkBackend` 桩后端 +
+    （无头测试：`ui.start` 内部组合的 worker + `ui.setNetworkBackend` 桩后端 +
     `getNetworkJobs`/`resolveNetworkJob` 手动喂响应）。`cc_stub.lua` 增加 `os.queueEvent`
-    与队列优先排空（先于 step 脚本），模拟真实 CC 的「排队事件广播给所有消费者」。
+    与队列优先排空（先于 step 脚本），模拟真实 CC 的「排队事件广播给所有消费者」；
+    `parallel.waitForAll` 桩改用 `osPullEvent` 取事件（可重入，支持 `start` 内的嵌套 parallel）。
   - **与文档的偏差**：`fetch`/`useRequest` 是全局（`MAPPED_FUNCS` 映射到运行时），TS 类型层
     `Future<T>` 以 `PromiseLike<T>` 呈现以便 `await` 解包类型。async 组件（含 JSX 的 async 函数）
     编译期报错。

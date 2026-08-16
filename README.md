@@ -11,7 +11,7 @@
 **里程碑 3「网络接入」已实现**：`async/await` 编译为事件驱动状态机 + `fetch`（复用 `docs/lib`
 HTTP 客户端，后台任务执行）+ `useRequest`（loading/data/error 三态）。
 编译产物为**模块**（`start(side)` 任务函数），由主程序经 simpleParallel 非阻塞调度
-（与网络任务 `networkLoop()` 并发）。
+（`start` 内部用 `parallel.waitForAll` 组合 UI 循环与网络 worker，一个任务即可）。
 
 ## 目录
 
@@ -39,7 +39,7 @@ npm run test:all   # typecheck + build + test
 
 编译产物是**模块**而非独立程序：它导出 `start(side)` 任务函数，由主程序通过
 [simpleParallel](https://tweaked.cc/module/parallel.html)（`parallel.waitForAll` 封装）调度，
-从而与网络任务（`docs/lib/` 网络栈 + 模块的 `networkLoop()`）并发运行。把下列文件通过 SFTP 拷进
+从而与网络任务（`docs/lib/` 网络栈）并发运行。把下列文件通过 SFTP 拷进
 游戏存档的电脑目录（`saves/<存档>/computers/<id>/`）：
 
 ```
@@ -55,7 +55,8 @@ lua main.lua left
 ```
 
 `left` 是 GPU 外设所在的 side（默认 `left`）。主程序里就是简单的任务组合 —— **网络客户端由主程序
-构建**（它拥有 IP 栈配置），实例传给 UI 模块，`networkLoop()` 作为 fetch 的 worker 任务：
+构建**（它拥有 IP 栈配置），实例传给 UI 模块；`ui.start()` 内部已组合 fetch 的 worker 循环
+（`networkLoop`），**只需添加一个任务**：
 
 ```lua
 local simpleParallel = require("lib.simpleParallel")
@@ -75,8 +76,7 @@ local ipIface = IP.new({
 })
 ui.setHttpClient(HTTP.newClient(ipIface, { dnsServer = "8.8.8.8", timeout = 10 }))
 
-simpleParallel.add(function() ui.start("left") end)   -- UI 任务
-simpleParallel.add(function() ui.networkLoop() end)   -- fetch worker（网络任务）
+simpleParallel.add(function() ui.start("left") end)   -- UI + fetch worker
 simpleParallel.start()
 ```
 
@@ -186,7 +186,8 @@ Enter 257 / Tab 258 / Backspace 259 / Delete 261 / Left 263 / Right 262 / Home 2
 
 `async function` / `async () =>` 编译为**事件驱动状态机**：体部同步执行到第一个 `await`，
 之后的所有代码成为续体闭包，等 `await` 的 future 解析后再运行（完全不用原生 Lua 协程）。
-`fetch(url, options)` 返回一个 future，请求在**后台任务**（主程序的 `ui.networkLoop()`）里执行，
+`fetch(url, options)` 返回一个 future，请求在**后台 worker**（`ui.start()` 内部组合的
+`networkLoop` 循环，独立协程）里执行，
 UI 事件循环不被阻塞；失败（连接失败 / DNS / 未配置）解析为 `{ ok = false, error }` 响应，
 直接按 `resp.ok` 分支即可（v1 未编译 await 的 try/catch）：
 
@@ -217,8 +218,8 @@ const req = useRequest(() => fetch('http://192.168.1.50:8080/quote'));
 <Text>{req.loading ? 'loading…' : req.error ? req.error : req.data.body}</Text>
 ```
 
-部署时主程序要构建网络客户端并注册 worker（见「部署」）：`ui.setHttpClient(client)`（docs/lib 的
-HTTP client 实例，由主程序构建）+ `simpleParallel.add(function() ui.networkLoop() end)`。`fetch` 的
+部署时主程序要构建网络客户端（见「部署」）：`ui.setHttpClient(client)`（docs/lib 的 HTTP client
+实例，由主程序构建）；worker 已内置于 `ui.start()`。`fetch` 的
 响应是 docs/lib 的 HTTP 响应（`ok / status / statusText / headers / body`，`text()` / `json()`）；
 JSON body 用 `resp.json()`。
 
@@ -245,10 +246,10 @@ JSON body 用 `resp.json()`。
   同名组件自动改名、跨文件 hooks/props/常量均可用（见上文「多文件」）；编译产物是模块，
   `start(side)` 作为 simpleParallel 任务被主程序调度（见「部署」）
 - 网络（里程碑 3）：`async function` / `async () =>` 编译为事件驱动状态机（`await` → 续体闭包链，
-  无原生协程）；`fetch(url, options)` 返回 future（请求在 `networkLoop()` 后台任务执行；
+  无原生协程）；`fetch(url, options)` 返回 future（请求在 `networkLoop` 后台 worker 执行；
   失败解析为 `{ ok = false, error }`）；`useRequest(fetcher, deps)` 三态 hook（loading/data/error +
   refetch，含过期响应丢弃）；`await` 非 future 值按 JS 语义透传；主程序构建 docs/lib HTTP client
-  并用 `ui.setHttpClient(client)` + `simpleParallel.add(ui.networkLoop)` 接线（见「网络」与「部署」）
+  并用 `ui.setHttpClient(client)` 注入，worker 内置于 `ui.start()`（见「网络」与「部署」）
 
 ## 故障排查：真机黑屏（已修复 2025-08）
 
@@ -300,8 +301,8 @@ JSON body 用 `resp.json()`。
     循环/switch 本就不在 codegen 支持范围。多级**顺序** await 支持。
   - `await` 的 try/catch 未编译：错误处理用 `resp.ok` / `resp.error` 分支。
   - async 组件（含 JSX 的 async 函数）编译期报错——组件必须同步返回元素。
-  - `fetch` 需要主程序构建 docs/lib HTTP client 并传入（`ui.setHttpClient(client)`）+
-    注册 `networkLoop()` 任务；未传入时 fetch 解析为
+  - `fetch` 需要主程序构建 docs/lib HTTP client 并传入（`ui.setHttpClient(client)`）；
+    worker 已内置于 `ui.start()`（无需额外注册任务）。未传入时 fetch 解析为
     `{ ok = false, error = "http client not set: ..." }`。
   - 网络栈（`docs/lib`）的 IP/ARP/DNS 任务必须在 `simpleParallel.start()` 前构造
     （主程序构建 client 时即完成）；`fetch` 只支持 `http://`（docs/lib 现状）。
