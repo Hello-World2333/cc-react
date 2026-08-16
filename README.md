@@ -10,6 +10,8 @@
 里程碑 1「键盘输入 + 焦点管理」已实现（`<Input>` 文本框 + 点击聚焦 / Tab 切换 + 光标闪烁）；
 **里程碑 3「网络接入」已实现**：`async/await` 编译为事件驱动状态机 + `fetch`（复用 `docs/lib`
 HTTP 客户端，后台任务执行）+ `useRequest`（loading/data/error 三态）。
+**中文渲染（opt-in）已实现（2025-08）**：`ui.setChineseFont("字库.fnt")` 启用 16px 自定义字体
+（可修改字体 + 二进制字库懒加载 + UTF-8→槽号编码，见「中文渲染」）。
 编译产物为**模块**（`start(side)` 任务函数），由主程序经 simpleParallel 非阻塞调度
 （`start` 内部用 `parallel.waitForAll` 组合 UI 循环与网络 worker，一个任务即可）。
 
@@ -122,6 +124,10 @@ local ipIface = IP.new({
   },
 })
 ui.setHttpClient(HTTP.newClient(ipIface, { dnsServer = "8.8.8.8", timeout = 10 }))
+
+-- 中文渲染（可选）：指向电脑磁盘上的二进制字库文件（format v1，见「中文渲染」）。
+-- 在 simpleParallel.start() 之前调用；不调用则保持默认 5x8 ASCII 字体。
+-- ui.setChineseFont("hanchan16-common.fnt")
 
 simpleParallel.add(function() ui.start("left") end)   -- UI + fetch worker
 simpleParallel.start()
@@ -294,6 +300,32 @@ const req = useRequest(() => fetch('http://192.168.1.50:8080/quote'));
 实例，由主程序构建）；worker 已内置于 `ui.start()`。`fetch` 的
 响应是 docs/lib 的 HTTP 响应（`ok / status / statusText / headers / body`，`text()` / `json()`）；
 JSON body 用 `resp.json()`。
+
+### 中文渲染（自定义字体，2025-08）
+
+Tom's GPU 的默认字体（ascii）是**只读**的（真机验证 `Selected font is not modifiable`），
+且只有 256 个 ASCII 字形。中文支持走「可修改字体 + 二进制字库文件 + 懒加载」：
+
+1. **字库文件**（format v1，`make_font_bin.py` 生成）放电脑磁盘：
+   `"CCF1"` 魔数 + 条目数 + 37B 定长条目（码点 u32 BE + 宽度 u8 + 16×u16 BE 位图行，
+   bit0=最左像素），按码点升序 → 运行时 `fs.open("rb")` + 二分查找按需读取。
+2. 主程序调用 `ui.setChineseFont("hanchan16-common.fnt")`（`start()` 之前）。
+   `start()` 内初始化：`setFont("unicode_page_e0")`（切到可修改字体）→ `clearChars()`
+   → 注册 ASCII 0x20-0x7E + □ 回退槽（0xFF）。
+3. **所有文本**在进 `drawText`/`getTextLength` 前过 UTF-8→槽号编码：ASCII 直通，
+   汉字按需从字库注册（`addNewChar`，槽 0x80-0xFE，最多 127 个不同汉字/会话），
+   字库中没有的字渲染为 **□**（槽 0xFF）。度量、裁剪、Input 光标均按编码后串计算。
+
+要点与限制：
+
+- **Opt-in**：不调 `setChineseFont` 时行为与之前完全一致（默认 5x8 字体）。
+- 启用后所有文字按 **16px** 字高渲染（`fontSize` 为倍率），行高 = 16×fontSize；
+  空格宽度被模组硬编码为 5+1=6px（与度量一致）。
+- 槽位上限 127 个汉字/会话：超过后新字显示 □。动态内容（网络/用户输入）会懒加载
+  新字形，槽满后可自行加 LRU 淘汰（`delChar` + `addNewChar`，已在探针中验证）。
+- `Input` 编辑已改为**按字符**操作（Backspace/Delete/方向键不会拆坏多字节汉字）。
+- 生成常用字库：`python3 make_font_bin.py chinese16px.ttf -o hanchan16-common.fnt
+  --chars-file 字表.txt`（3755 GB2312 一级 ≈ 139KB，含 ASCII）。
 
 ### 支持范围（MVP）
 

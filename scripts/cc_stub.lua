@@ -63,6 +63,12 @@ t.stub = {
   calls = {},            -- recorded GPU calls (for dirty-rect assertions)
   order = {},            -- recorded startup call order
   wrapCalls = {},        -- peripheral.wrap sides (start(side) contract)
+  -- Chinese-font state: the runtime switches the GPU to the modifiable
+  -- "unicode_page_e0" font and registers glyphs with addNewChar; the stub
+  -- mirrors per-char advances (registered width, else 16 in font mode).
+  fontName = nil,
+  fontMode = false,
+  chars = {},            -- byte -> { width, rows }
 }
 
 local function makeBuffer()
@@ -97,14 +103,37 @@ local function drawCharCell(b, x, y, ch, fg, size)
   end
 end
 
-local function drawText(b, x, y, text, fg, bg, size, pad)
+-- Per-byte advance: registered glyph width, else 16 in font mode (cleared
+-- unicode page falls back to the default char), else the 5px default font.
+local function stubCharWidth(b)
+  local e = t.stub.chars[b]
+  if e then return e[1] end
+  if t.stub.fontMode then return 16 end
+  return FONT_W
+end
+
+local function stubFontH()
+  return t.stub.fontMode and 16 or FONT_H
+end
+
+local function stubTextAdvance(text, size, pad)
   size = size or 1
   pad = pad or 1 -- mod default: 1px between chars
-  local cw = (FONT_W + pad) * size
-  local ch = FONT_H * size
-  if bg then fillRect(b, x, y, cw * #text, ch, bg) end
+  local sum = 0
+  for i = 1, #text do sum = sum + stubCharWidth(string.byte(text, i)) end
+  return (sum + pad * #text) * size
+end
+
+local function drawText(b, x, y, text, fg, bg, size, pad)
+  size = size or 1
+  pad = pad or 1
+  local ch = stubFontH() * size
+  if bg then fillRect(b, x, y, stubTextAdvance(text, size, pad), ch, bg) end
+  local cx = x
   for i = 1, #text do
-    drawCharCell(b, x + (i - 1) * cw, y, text:sub(i, i), fg, size)
+    local cw = (stubCharWidth(string.byte(text, i)) + pad) * size
+    drawCharCell(b, cx, y, text:sub(i, i), fg, size)
+    cx = cx + cw
   end
 end
 
@@ -149,8 +178,8 @@ local fakeGpu = {
     -- mirror the real GPU: throws when the text would extend past the edge
     size = size or 1
     pad = pad or 1
-    local tw = (FONT_W + pad) * #text * size
-    local th = FONT_H * size
+    local tw = stubTextAdvance(text, size, pad)
+    local th = stubFontH() * size
     if x < 1 or y < 1 or x + tw - 1 > VW or y + th - 1 > VH then
       error("Out of boundary", 0)
     end
@@ -158,9 +187,23 @@ local fakeGpu = {
     if t.stub.buf then drawText(t.stub.buf, x, y, text, fg, bg, size, pad) end
   end,
   getTextLength = function(text, size, pad)
-    size = size or 1
-    pad = pad or 1
-    return (FONT_W + pad) * #text * size
+    return stubTextAdvance(text, size, pad)
+  end,
+  -- Chinese font support (mirrors the modifiable-font contract):
+  setFont = function(name)
+    t.stub.calls[#t.stub.calls + 1] = { "setFont", name }
+    t.stub.fontName = name
+    t.stub.fontMode = (name == "unicode_page_e0")
+  end,
+  getFont = function() return t.stub.fontName end,
+  clearChars = function()
+    t.stub.calls[#t.stub.calls + 1] = { "clearChars" }
+    t.stub.chars = {}
+  end,
+  addNewChar = function(char, width, ...)
+    local rows = { ... }
+    t.stub.calls[#t.stub.calls + 1] = { "addNewChar", char, width, #rows }
+    t.stub.chars[string.byte(char)] = { width, rows }
   end,
   sync = function() t.stub.synced = t.stub.synced + 1 end,
 }
@@ -171,6 +214,15 @@ _G.peripheral = {
   wrap = function(side)
     t.stub.wrapCalls[#t.stub.wrapCalls + 1] = side
     return fakeGpu
+  end,
+}
+
+-- Minimal fs stub for the Chinese font path: CC's fs.open(path, "rb") returns
+-- a handle with read(n)/seek("set", pos)/close() — Lua io handles expose the
+-- exact same API, so we pass them straight through.
+_G.fs = {
+  open = function(path, mode)
+    return io.open(path, mode or "r")
   end,
 }
 
