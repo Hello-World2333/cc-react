@@ -1,5 +1,5 @@
 /**
- * cc-react MVP demo.
+ * cc-react demo — entry file.
  *
  * Exercises both MVP acceptance criteria (docs/architecture.md §14):
  *   1. static page rendering — styled Box/Text/Button/Panel tree laid out by
@@ -7,9 +7,18 @@
  *   2. interaction + dirty-rect loop — button clicks update hooks state,
  *      re-run the component, compare layout trees and repaint only changes
  *
+ * Multi-file demo: the UI is split across files (demo/components/*), imported
+ * here with normal import/export statements. The compiler BUNDLES them into
+ * the single Lua module before codegen, so deployment stays one ui.lua file.
+ *
  * The `useState` / `useEffect` / `render` globals are provided by the Lua
  * runtime; the compiler maps them onto its hook/entry machinery.
  */
+
+import { Header } from './components/Header';
+import { CounterControls } from './components/CounterControls';
+import { BigNumberBadge } from './components/Badge';
+import { HistoryList } from './components/HistoryList';
 
 function App() {
   const [count, setCount] = useState(0);
@@ -35,43 +44,20 @@ function App() {
         padding: 10,
       }}
     >
-      <Text style={{ fontSize: 3, color: '#ffffff', marginBottom: 4 }}>cc-react</Text>
-      <Text style={{ fontSize: 1, color: '#6a6a78', marginBottom: 8 }}>
-        React-style UI for CC + Tom's GPU
-      </Text>
-      <Text style={{ fontSize: 2, color: '#ffd866', marginBottom: 12 }}>Count: {count}</Text>
+      <Header count={count} />
 
-      <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-        <Button label="-" style={{ width: 40, height: 40, fontSize: 2 }} onClick={() => setCount(count - 1)} />
-        <Button label="+" style={{ width: 40, height: 40, fontSize: 2 }} onClick={() => setCount(count + 1)} />
-        <Button label="Reset" onClick={() => setCount(0)} />
-        <Button label="Record" onClick={() => setHistory([...history, count])} />
-      </Box>
+      <CounterControls
+        onDecrement={() => setCount(count - 1)}
+        onIncrement={() => setCount(count + 1)}
+        onReset={() => setCount(0)}
+        onRecord={() => setHistory([...history, count])}
+      />
 
       <Text style={{ fontSize: 1, color: '#5a5a66', marginTop: 8 }}>{lastChange}</Text>
 
-      {count >= 5 ? (
-        <Panel style={{ marginTop: 8, padding: 8, backgroundColor: '#1c2230' }}>
-          <Text style={{ color: '#7ec8ff' }}>big number!</Text>
-        </Panel>
-      ) : null}
+      {count >= 5 ? <BigNumberBadge /> : null}
 
-      {history.length > 0 ? (
-        <Panel
-          style={{
-            marginTop: 8,
-            padding: 10,
-            backgroundColor: '#17171e',
-            flexDirection: 'column',
-            alignItems: 'center',
-          }}
-        >
-          <Text style={{ color: '#8a8a95', marginBottom: 4 }}>Recorded:</Text>
-          {history.map((v) => (
-            <Text style={{ color: '#7ec8ff' }}>#{v}</Text>
-          ))}
-        </Panel>
-      ) : null}
+      <HistoryList history={history} />
     </Panel>
   );
 }

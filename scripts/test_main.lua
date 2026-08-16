@@ -1,5 +1,5 @@
 --[[
-  Headless test harness for cc-react compiled output.
+  Headless test harness for cc-react demo compiled output.
 
   Boots dist/ui.lua against a stubbed CC environment (fake Tom's Peripherals
   GPU with a pixel buffer) and verifies the MVP acceptance criteria plus the
@@ -14,338 +14,30 @@
        faithful parallel.waitForAll stub alongside a second task, which also
        receives every event (CC broadcasts to all consumers)
 
-  Events are fed as a *step script*: a step is either
-      { eventFn = function() return {name, ...} end }  — delivered to the
-                                                         program; evaluated at
-                                                         pull time so it can
-                                                         read the live tree
-      { snapshot = function() ... end }                — runs between events,
-                                                         right after the
-                                                         previous render
-  The stub's event source throws __TEST_END__ when the script drains, which
-  unwinds the UI task (or the parallel scheduler) and returns control here.
+  The CC/GPU stub itself lives in scripts/cc_stub.lua (shared with
+  scripts/test_multiimport.lua); the demo assertions are here.
 
   Usage: lua5.1 scripts/test_main.lua [path-to-module.lua]
 ]]
 
-local MAIN = arg and arg[1] or "dist/ui.lua"
-
+-- Capture the real os.exit BEFORE the stub replaces _G.os (cc_stub.lua
+-- installs a stub os for the program under test).
 local realExit = os.exit
 
--- CC: Tweaked exposes table.unpack (Lua 5.2 compat); plain Lua 5.1 only has
--- the global unpack, so mirror the CC environment.
-if not table.unpack then table.unpack = unpack end
+local t = require("scripts.cc_stub")
+local check = t.check
+local boot = t.boot
+local stub = t.stub
+local findNodes = t.findNodes
+local findText = t.findText
+local findButton = t.findButton
+local clickButton = t.clickButton
+local regionDiff = t.regionDiff
+local countNonBg = t.countNonBg
+local deepCopy = t.deepCopy
+local VW, VH = t.VW, t.VH
 
-local VW, VH = 256, 192   -- real device: 4x3 monitor at resolution 64 → 256x192 px
-local FONT_W, FONT_H = 5, 8   -- default font is 5x8 (ascii.bin header)
-
-local failures = 0
-local function check(cond, msg)
-  if cond then
-    print("  ok  " .. msg)
-  else
-    failures = failures + 1
-    print("  FAIL " .. msg)
-  end
-end
-
--- ================= stub GPU =================
-
-local stub = {
-  steps = {},            -- step script (eventFn / snapshot)
-  buf = nil,             -- buf[y][x], 0-based ARGB pixels
-  synced = 0,
-  calls = {},            -- recorded GPU calls (for dirty-rect assertions)
-  order = {},            -- recorded startup call order
-  wrapCalls = {},        -- peripheral.wrap sides (start(side) contract)
-}
-
-local function makeBuffer()
-  local b = {}
-  for y = 0, VH - 1 do
-    b[y] = {}
-    for x = 0, VW - 1 do b[y][x] = 0xFF000000 end
-  end
-  return b
-end
-
-local function setPixel(b, x, y, c)
-  if x >= 0 and x < VW and y >= 0 and y < VH then b[y][x] = c end
-end
-
-local function fillRect(b, x, y, w, h, c)
-  for yy = y, y + h - 1 do
-    for xx = x, x + w - 1 do setPixel(b, xx, yy, c) end
-  end
-end
-
--- Deterministic pseudo-glyph: fills most of the char cell, leaving a pattern
--- of holes derived from the char code, so different strings differ on screen.
-local function drawCharCell(b, x, y, ch, fg, size)
-  local seed = string.byte(ch)
-  for yy = 0, FONT_H * size - 1 do
-    for xx = 0, FONT_W * size - 1 do
-      if (seed + xx * 3 + yy * 5) % 7 ~= 0 then
-        setPixel(b, x + xx, y + yy, fg)
-      end
-    end
-  end
-end
-
-local function drawText(b, x, y, text, fg, bg, size, pad)
-  size = size or 1
-  pad = pad or 1 -- mod default: 1px between chars
-  local cw = (FONT_W + pad) * size
-  local ch = FONT_H * size
-  if bg then fillRect(b, x, y, cw * #text, ch, bg) end
-  for i = 1, #text do
-    drawCharCell(b, x + (i - 1) * cw, y, text:sub(i, i), fg, size)
-  end
-end
-
-local fakeGpu = {
-  getSize = function()
-    stub.order[#stub.order + 1] = "getSize"
-    return VW, VH, 3, 4, 64
-  end,
-  setSize = function()
-    stub.order[#stub.order + 1] = "setSize"
-  end,
-  refreshSize = function()
-    stub.order[#stub.order + 1] = "refreshSize"
-  end,
-  fill = function(c)
-    stub.calls[#stub.calls + 1] = { "fill", c }
-    if stub.buf then fillRect(stub.buf, 0, 0, VW, VH, c) end
-  end,
-  filledRectangle = function(x, y, w, h, c)
-    -- mirror the real GPU: 1-based, throws when x or y < 1 (far edge clamps)
-    if x < 1 or y < 1 then error("Out of boundary", 0) end
-    stub.calls[#stub.calls + 1] = { "filledRectangle", x, y, w, h, c }
-    if stub.buf then fillRect(stub.buf, x, y, w, h, c) end
-  end,
-  rectangle = function(x, y, w, h, c)
-    if x < 1 or y < 1 then error("Out of boundary", 0) end
-    stub.calls[#stub.calls + 1] = { "rectangle", x, y, w, h, c }
-    if stub.buf then
-      for xx = x, x + w - 1 do
-        setPixel(stub.buf, xx, y, c)
-        setPixel(stub.buf, xx, y + h - 1, c)
-      end
-      for yy = y, y + h - 1 do
-        setPixel(stub.buf, x, yy, c)
-        setPixel(stub.buf, x + w - 1, yy, c)
-      end
-    end
-  end,
-  drawText = function(x, y, text, fg, bg, size, pad)
-    -- mirror the real GPU: fg/bg must be Numbers (nil → Bad argument #5)
-    if fg == nil or bg == nil then error("Bad argument: (expected Number)", 0) end
-    -- mirror the real GPU: throws when the text would extend past the edge
-    size = size or 1
-    pad = pad or 1
-    local tw = (FONT_W + pad) * #text * size
-    local th = FONT_H * size
-    if x < 1 or y < 1 or x + tw - 1 > VW or y + th - 1 > VH then
-      error("Out of boundary", 0)
-    end
-    stub.calls[#stub.calls + 1] = { "drawText", x, y, text, fg, bg, size, pad }
-    if stub.buf then drawText(stub.buf, x, y, text, fg, bg, size, pad) end
-  end,
-  getTextLength = function(text, size, pad)
-    size = size or 1
-    pad = pad or 1
-    return (FONT_W + pad) * #text * size
-  end,
-  sync = function() stub.synced = stub.synced + 1 end,
-}
-
--- ================= stub CC environment =================
-
-_G.peripheral = {
-  wrap = function(side)
-    stub.wrapCalls[#stub.wrapCalls + 1] = side
-    return fakeGpu
-  end,
-}
-
--- Main-coroutine event source: consumes one step-script entry. Runs a
--- snapshot inline, or evaluates an eventFn and returns its tuple. Throws
--- __TEST_END__ when the script drains.
-local function pullEventDirect()
-  if #stub.steps == 0 then
-    error("__TEST_END__", 0)
-  end
-  local step = table.remove(stub.steps, 1)
-  if step.snapshot then
-    step.snapshot()
-    return pullEventDirect()
-  end
-  local ev = step.eventFn()
-  return ev[1], ev[2], ev[3], ev[4], ev[5], ev[6]
-end
-
--- CC broadcasts events to every consumer. Mirror CC's parallel contract:
--- inside a task coroutine os.pullEvent yields to the scheduler (which
--- resumes the task with the next event); in the main coroutine it consumes
--- the step script directly (standalone start(), or the scheduler's own pull).
-local function osPullEvent()
-  if coroutine.running() ~= nil then
-    return coroutine.yield()
-  end
-  return pullEventDirect()
-end
-
-_G.os = {
-  pullEvent = osPullEvent,
-  shutdown = function() end,
-}
--- CC global; the runtime no longer sleeps at startup (refreshSize is
--- blocking), but keep a stub in case any future code path calls it.
-_G.sleep = function() end
-
--- Faithful minimal parallel.waitForAll stub (modeled on CC: Tweaked's
--- rom/apis/parallel.lua): each task runs in a coroutine; the first resume
--- happens with an EMPTY event (so tasks run their initial code — the UI
--- task renders its first frame — before the first real event), then every
--- pulled event is delivered to tasks whose filter (the value their
--- os.pullEvent yielded) is nil or matches the event name.
-_G.parallel = {
-  waitForAll = function(...)
-    local threads = {}
-    local count = select("#", ...)
-    for i = 1, count do
-      threads[i] = { co = coroutine.create(select(i, ...)), filter = nil }
-    end
-    local event = {} -- first iteration: empty event, like real CC
-    while true do
-      local i = 1
-      while i <= count do
-        local t = threads[i]
-        local resumeWith
-        if t.filter == nil or t.filter == event[1] or event[1] == "terminate" then
-          resumeWith = event
-        end
-        if resumeWith then
-          local ok, param = coroutine.resume(t.co, table.unpack(resumeWith, 1, #resumeWith))
-          if not ok then error("parallel task failed: " .. tostring(param), 0) end
-          if coroutine.status(t.co) == "dead" then
-            table.remove(threads, i)
-            count = count - 1
-            i = i - 1
-          end
-          t.filter = param
-        end
-        i = i + 1
-      end
-      if count == 0 then return end
-      event = { pullEventDirect() }
-    end
-  end,
-}
-
--- ================= boot =================
-
-local uiMod = nil
-
--- Load the compiled module, then run its start() — either standalone or as
--- one task of parallel.waitForAll (when extraTask is given). The step script
--- drives it until it drains (the event source throws __TEST_END__).
-local function boot(steps, extraTask)
-  stub.steps = steps or {}
-  stub.buf = makeBuffer()
-  stub.synced = 0
-  stub.calls = {}
-  stub.order = {}
-  stub.wrapCalls = {}
-  local ok, res = pcall(dofile, MAIN)
-  if not ok then
-    error("test harness: boot failed: " .. tostring(res))
-  end
-  if type(res) ~= "table" or type(res.start) ~= "function" then
-    error("test harness: " .. MAIN .. " does not return a module with a start() function")
-  end
-  uiMod = res
-  local run = function()
-    if extraTask then
-      _G.parallel.waitForAll(function() uiMod.start("left") end, extraTask)
-    else
-      uiMod.start("left")
-    end
-  end
-  local ok2, err = pcall(run)
-  if ok2 then
-    error("test harness: the program returned without throwing __TEST_END__")
-  end
-  if not tostring(err):find("__TEST_END__") then
-    error("test harness: the program failed: " .. tostring(err))
-  end
-end
-
--- ================= helpers over the live tree =================
-
-local function findNodes(root, pred)
-  local out = {}
-  local function walk(n)
-    if pred(n) then out[#out + 1] = n end
-    for i = 1, #n.children do walk(n.children[i]) end
-  end
-  if root then walk(root) end
-  return out
-end
-
-local function findText(root, prefix)
-  return findNodes(root, function(n)
-    return n.kind == "text" and n.text and n.text:sub(1, #prefix) == prefix
-  end)[1]
-end
-
-local function findButton(root, label)
-  return findNodes(root, function(n) return n.kind == "button" and n.label == label end)[1]
-end
-
-local function centerOf(n)
-  return n.x + math.floor(n.w / 2), n.y + math.floor(n.h / 2)
-end
-
--- build an eventFn that clicks the button with `label` at its *current* center
-local function clickButton(label)
-  return function()
-    local b = findButton(uiMod.getTree(), label)
-    if not b then error("test harness: button '" .. label .. "' not found in tree") end
-    local x, y = centerOf(b)
-    return { "tm_monitor_touch", x, y, false }
-  end
-end
-
-local function regionDiff(a, b, x1, y1, x2, y2)
-  local d = 0
-  for y = y1 - 1, y2 - 1 do
-    for x = x1 - 1, x2 - 1 do
-      if a[y][x] ~= b[y][x] then d = d + 1 end
-    end
-  end
-  return d
-end
-
-local function countNonBg(buf)
-  local n = 0
-  for y = 0, VH - 1 do
-    for x = 0, VW - 1 do
-      if buf[y][x] ~= 0xFF000000 then n = n + 1 end
-    end
-  end
-  return n
-end
-
-local function deepCopy(t)
-  local out = {}
-  for y = 0, VH - 1 do
-    out[y] = {}
-    for x = 0, VW - 1 do out[y][x] = t[y][x] end
-  end
-  return out
-end
+t.MAIN = arg and arg[1] or "dist/ui.lua"
 
 -- ================= tests =================
 
@@ -355,7 +47,7 @@ print("== module contract ==")
 boot({
   {
     snapshot = function()
-      check(type(uiMod.start) == "function" and type(uiMod.getTree) == "function",
+      check(type(t.uiMod.start) == "function" and type(t.uiMod.getTree) == "function",
         "module returns a table with start() + debug hooks")
       check(stub.wrapCalls[1] == "left",
         "start(side) wraps the GPU on the passed side ('left')")
@@ -372,9 +64,9 @@ boot({
   -- after the initial render: verify the static page
   {
     snapshot = function()
-      local tree = uiMod.getTree()
+      local tree = t.uiMod.getTree()
       check(tree ~= nil, "boot: root tree exists")
-      check(uiMod.getViewport() == VW and select(2, uiMod.getViewport()) == VH,
+      check(t.uiMod.getViewport() == VW and select(2, t.uiMod.getViewport()) == VH,
         "viewport is " .. VW .. "x" .. VH)
 
       local title = findText(tree, "cc-react")
@@ -405,7 +97,7 @@ boot({
   { eventFn = clickButton("+") },
   {
     snapshot = function()
-      local tree = uiMod.getTree()
+      local tree = t.uiMod.getTree()
       local countText = findText(tree, "Count:")
       check(countText.text == "Count: 1", "count incremented to 1 after + click")
       local last = findText(tree, "count ->")
@@ -423,7 +115,7 @@ boot({
   { eventFn = clickButton("Reset") },
   {
     snapshot = function()
-      local countText = findText(uiMod.getTree(), "Count:")
+      local countText = findText(t.uiMod.getTree(), "Count:")
       check(countText.text == "Count: 0", "count reset to 0 via tm_monitor_touch")
     end,
   },
@@ -435,7 +127,7 @@ boot({
   { eventFn = clickButton("+") },
   {
     snapshot = function()
-      local tree = uiMod.getTree()
+      local tree = t.uiMod.getTree()
       local countText = findText(tree, "Count:")
       check(countText.text == "Count: 5", "count reached 5 after repeated clicks")
       local badge = findNodes(tree, function(n) return n.text == "big number!" end)[1]
@@ -453,7 +145,7 @@ boot({
   { eventFn = clickButton("Record") },
   {
     snapshot = function()
-      local tree = uiMod.getTree()
+      local tree = t.uiMod.getTree()
       local recorded = findText(tree, "Recorded:")
       check(recorded ~= nil, "'Recorded:' list header present")
       local rows = findNodes(tree, function(n)
@@ -467,7 +159,7 @@ boot({
   { eventFn = clickButton("+") },
   {
     snapshot = function()
-      local tree = uiMod.getTree()
+      local tree = t.uiMod.getTree()
       local countText = findText(tree, "Count:")
       check(countText.text == "Count: 6", "count is 6 after one more click")
       local title = findText(tree, "cc-react")
@@ -505,7 +197,7 @@ boot({
   { eventFn = clickButton("Record") },
   {
     snapshot = function()
-      local tree = uiMod.getTree()
+      local tree = t.uiMod.getTree()
       local rows = findNodes(tree, function(n)
         return n.kind == "text" and n.text:sub(1, 1) == "#"
       end)
@@ -518,7 +210,7 @@ boot({
 
 print("== fresh boot starts clean ==")
 boot({})
-local countText = findText(uiMod.getTree(), "Count:")
+local countText = findText(t.uiMod.getTree(), "Count:")
 check(countText.text == "Count: 0", "fresh program starts at Count: 0")
 
 print("== startup order: refreshSize -> setSize -> getSize ==")
@@ -555,7 +247,7 @@ boot({
   -- task renders its first frame before the first real event is pulled
   {
     snapshot = function()
-      local tree = uiMod.getTree()
+      local tree = t.uiMod.getTree()
       check(tree ~= nil, "parallel: initial frame rendered before the first event")
       local countText = findText(tree, "Count:")
       check(countText ~= nil and countText.text == "Count: 0", "parallel: initial count is 0")
@@ -565,7 +257,7 @@ boot({
   { eventFn = clickButton("+") },
   {
     snapshot = function()
-      local countText = findText(uiMod.getTree(), "Count:")
+      local countText = findText(t.uiMod.getTree(), "Count:")
       check(countText.text == "Count: 1", "parallel: click processed by the UI task")
       check(#secondTaskEvents >= 1 and secondTaskEvents[1] == "tm_monitor_touch",
         "parallel: second task received the same touch event (broadcast)")
@@ -574,7 +266,7 @@ boot({
   { eventFn = clickButton("Record") },
   {
     snapshot = function()
-      local rows = findNodes(uiMod.getTree(), function(n)
+      local rows = findNodes(t.uiMod.getTree(), function(n)
         return n.kind == "text" and n.text:sub(1, 1) == "#"
       end)
       check(#rows == 1, "parallel: record processed after the + click")
@@ -584,10 +276,10 @@ boot({
 }, parallelTask)
 
 print("")
-if failures == 0 then
+if t.failures == 0 then
   print("ALL TESTS PASSED")
   realExit(0)
 else
-  print(failures .. " TEST(S) FAILED")
+  print(t.failures .. " TEST(S) FAILED")
   realExit(1)
 end

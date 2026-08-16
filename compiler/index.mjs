@@ -2,12 +2,20 @@
  * cc-react compiler entry.
  *
  * Pipeline (docs/architecture.md §5):
- *   1. esbuild strips TypeScript types and preserves JSX (single-file apps)
- *   2. @babel/parser builds a JSX AST
+ *   1. esbuild BUNDLES the whole app (entry + imports across multiple .tsx /
+ *      .ts files), strips TypeScript types and preserves JSX — the app may be
+ *      split across files with import/export, exactly like a normal React app
+ *   2. @babel/parser builds a JSX AST of the single bundled chunk
  *   3. codegen.mjs lowers the AST to Lua (style-tree construction code)
  *   4. the framework runtime (runtime/runtime.lua) is embedded verbatim and
  *      the chunk ends with `return ccreact` — the output is a MODULE whose
  *      start(side) is a simpleParallel task (the main program composes it)
+ *
+ * Multi-file imports are resolved at compile time (bundling): the Lua output
+ * stays a SINGLE module, so deployment is unchanged (copy ui.lua). Name
+ * collisions between files are resolved by esbuild (identifiers are renamed
+ * consistently, including JSX tags), and only the entry's exports survive as
+ * `export { ... }` statements, which codegen.mjs ignores.
  *
  * Usage: node compiler/index.mjs <entry.tsx> <out.lua>
  */
@@ -26,14 +34,30 @@ if (!entry || !outFile) {
   process.exit(1);
 }
 
-const src = fs.readFileSync(entry, 'utf8');
-const res = await esbuild.transform(src, {
-  loader: 'tsx',
-  jsx: 'preserve',
-  target: 'es2020',
-  format: 'esm',
-});
-const ast = parse(res.code, { sourceType: 'module', plugins: ['jsx'] });
+// Bundle the app: resolve every import/export across the source files into a
+// single chunk (jsx: 'preserve' keeps JSX syntax for codegen; .ts/.tsx are
+// esbuild's default loaders). The bundled chunk has no import statements
+// left — only the entry's own exports may survive as `export { ... }`.
+let bundled;
+try {
+  const res = await esbuild.build({
+    entryPoints: [entry],
+    bundle: true,
+    write: false,
+    jsx: 'preserve',
+    format: 'esm',
+    target: 'es2020',
+  });
+  bundled = res.outputFiles[0].text;
+} catch (err) {
+  console.error('cc-react: bundling failed:');
+  for (const e of err.errors || []) {
+    console.error('  ' + (e.text || String(e)));
+  }
+  process.exit(1);
+}
+
+const ast = parse(bundled, { sourceType: 'module', plugins: ['jsx'] });
 
 // ---- collect component names (functions whose body contains JSX) ----
 const components = [];

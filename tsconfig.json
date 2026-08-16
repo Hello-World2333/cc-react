@@ -11,5 +11,5 @@
     "forceConsistentCasingInFileNames": true,
     "types": []
   },
-  "include": ["demo/**/*.tsx", "framework/**/*.d.ts"]
+  "include": ["demo/**/*.tsx", "framework/**/*.d.ts", "scripts/fixtures/**/*.tsx", "scripts/fixtures/**/*.ts"]
 }

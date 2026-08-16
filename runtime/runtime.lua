@@ -39,6 +39,7 @@ local math = math
 local table = table
 local type = type
 local tostring = tostring
+local tonumber = tonumber
 local ipairs = ipairs
 local pairs = pairs
 local error = error
@@ -81,9 +82,19 @@ local COLOR_TEXT = 0xFFFFFFFF
 -- differently across bridges (LuaJ intValue wraps, a plain (int) cast
 -- saturates). The signed int32 value is correct under BOTH conversions.
 -- (The probe showed plain unsigned values also render fine on this mod.)
+-- Hex strings ("#rgb" / "#rrggbb" / "#aarrggbb") are accepted too: colors
+-- imported from other files (e.g. a theme module) arrive as runtime strings
+-- — compile-time folding only sees string literals in the same file.
 local function __color(c)
-  if type(c) == "number" and c > 2147483647 then
-    return c - 4294967296
+  if type(c) == "number" then
+    if c > 2147483647 then return c - 4294967296 end
+    return c
+  end
+  if type(c) == "string" and c:sub(1, 1) == "#" then
+    local h = c:sub(2)
+    if #h == 3 then h = h:gsub(".", "%0%0") end
+    if #h == 6 then return __color(0xFF000000 + tonumber(h, 16)) end
+    if #h == 8 then return __color(tonumber(h, 16)) end
   end
   return c
 end

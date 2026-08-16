@@ -52,7 +52,8 @@ Tom's Peripherals GPU（像素 framebuffer）
 
 产物形态：MVP 之后为**模块**（框架运行时内嵌在模块文件里，`dist/ui.lua`），由主程序
 `require` 后经 simpleParallel（`parallel.waitForAll` 封装）调度：`simpleParallel.add(function() ui.start(side) end)`，
-与未来的网络任务并发运行；多文件 `import`（TSX 拆多个模块）仍属后续里程碑。
+与未来的网络任务并发运行；多文件 `import`（TSX 拆多个模块）已支持——编译器在 esbuild 层把整个
+应用打包进单个 Lua 模块（部署不变，仍是一个 `ui.lua`）。
 
 ## 4. 决策汇总
 
@@ -165,7 +166,8 @@ MVP 之外的后续里程碑（按优先级建议）：
 2. 动态列表（keyed diff）
 3. 网络接入（async 状态机编译；任务侧已就绪 —— 模块的 `start(side)` 可直接与网络栈任务并行）
 4. 动画（声明式 transition）
-5. 多文件 import（TSX 拆多个模块；产物已模块化，运行时仍内嵌）
+5. ~~多文件 import（TSX 拆多个模块；产物已模块化，运行时仍内嵌）~~ **已实现（2025-08）**，
+   见附录「多文件 import」
 6. 自定义字体 / 中文
 
 ## 15. 待决问题
@@ -215,9 +217,25 @@ MVP 已按本文档落地，代码布局见仓库根目录 README。与本文档
   脏矩形各向外扩 2px 以覆盖字形越界残留。
 - **与文档的偏差**：
   - 组件对外命名为 `Box / Panel / Text / Button`（§10 大写命名），编译器同时接受小写别名。
-  - 编译入口为顶层 `render(<App/>)`（挂载根组件；产物是模块，运行时由 `start(side)` 启动），
-    **仅支持单文件模块**（多文件 import 未做）。
+  - 编译入口为顶层 `render(<App/>)`（挂载根组件；产物是模块，运行时由 `start(side)` 启动）。
+    多文件 import 已支持（见下「多文件 import」）。
   - 三元表达式降级为 Lua `and/or`，要求真值分支为真值（元素/数字/字符串），文档化限制。
   - 无滚动/裁剪；内容溢出视口不绘制也不可点击。
+- **多文件 import（2025-08）**：应用可按正常 React 习惯拆成多个 `.tsx` / `.ts` 文件并用
+  `import` / `export` 组织。编译管线改为 `esbuild.build({ bundle: true, jsx: 'preserve' })`
+  把整个应用打包成单个 chunk 再交给 codegen（§5 起步路径的升级）：Lua 产物仍是**单个模块**
+  （运行时内嵌、`start(side)` 任务、部署拷一个 `ui.lua`），文件拆分只是编译期的源码组织。
+  要点：
+  - 同名组件冲突由打包器改名（如 `Widget` → `Widget2`），JSX 标签与 `render_*` 函数名保持一致；
+    跨文件 hooks / props / 事件回调 / 常量均可用（hooks 状态槽按实例路径 + fnId 寻址，与源文件无关）。
+  - 入口文件的 `export { ... }`（esbuild `format: 'esm'` 产物）由 codegen 直接忽略；
+    `import` 语句在打包后不再出现，codegen 保留报错作为防御。
+  - 颜色常量可从其他文件导入：编译器只折叠**同文件内的** `#hex` 字符串字面量，跨文件的颜色常量
+    以字符串进入运行时，`__color` 增加 `#rgb/#rrggbb/#aarrggbb` 字符串解析（与编译期折叠同语义）。
+  - 组件/工具函数参数支持解构（`function Header({ title })` → `local title = props.title`）；
+    `if (x) return y;` 这类无花括号分支也归一化处理。
+  - 验证：`demo/` 已拆分为多文件（`demo/components/*`），新增多文件夹具
+    `scripts/fixtures/multi/`（同名组件冲突、默认导出、`.ts` 工具模块、跨文件 hooks、导入颜色常量）
+    与 `scripts/test_multiimport.lua`，共享 `scripts/cc_stub.lua` 桩环境（从 `test_main.lua` 抽出）。
 - **工具链**（§13）：部署仍由开发者自行 SFTP，工具链不负责。
 

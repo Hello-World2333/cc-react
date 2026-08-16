@@ -1,8 +1,9 @@
 /**
  * JSX → Lua code generator.
  *
- * Input: a Babel AST of the esbuild-transformed entry file (TS stripped, JSX
- * preserved, single file — no value imports in the MVP).
+ * Input: a Babel AST of the esbuild-BUNDLED entry (TS stripped, JSX
+ * preserved; all imports across files have already been inlined by esbuild,
+ * so no ImportDeclaration reaches this codegen).
  *
  * Strategy (docs/architecture.md §5): components compile to Lua functions that
  * build a *style tree* via node factories (__box/__text/__panel/__button).
@@ -137,14 +138,23 @@ export class Codegen {
   genTopLevel(stmt, out) {
     switch (stmt.type) {
       case 'ImportDeclaration':
+        // esbuild bundles all imports away before codegen; if one survives
+        // (e.g. codegen used on unbundled code) it is a hard error.
         throw new CodegenError(
-          'imports are not supported in the MVP (single-file apps only): ' + stmt.source.value);
+          'imports must be resolved by the bundler (the compiler bundles the whole app first): '
+          + stmt.source.value);
       case 'ExportNamedDeclaration':
       case 'ExportDefaultDeclaration': {
         if (stmt.declaration) {
           this.genTopLevel(stmt.declaration, out);
+        } else if (stmt.type === 'ExportNamedDeclaration') {
+          // `export { a, b }` — esbuild emits these for the entry's exports
+          // (format: 'esm'). The bindings were already emitted as top-level
+          // declarations; the export statement itself is meaningless in Lua.
+          // Skip it (re-exports of other modules were resolved at bundle time).
+          return;
         } else {
-          throw new CodegenError('re-export declarations are not supported');
+          throw new CodegenError('unsupported export declaration (no declaration)');
         }
         return;
       }
@@ -213,8 +223,9 @@ export class Codegen {
   genArrowComponent(decl, out) {
     const name = decl.id.name;
     const fn = decl.init;
-    const params = fn.params.map((p) => this.genPattern(p)).join(', ');
+    const { params, destructures } = this.genParams(fn.params);
     out.push(`local function render_${name}(${params})`);
+    this.emitDestructures(destructures, out, 1);
     if (fn.body.type === 'BlockStatement') {
       this.genStatements(fn.body.body, out, 1);
     } else {
@@ -228,10 +239,46 @@ export class Codegen {
     if (!name) throw new CodegenError('anonymous top-level functions are not supported');
     const isComponent = containsJsx(node);
     const luaName = isComponent ? 'render_' + name : name;
-    const params = node.params.map((p) => this.genPattern(p)).join(', ');
+    const { params, destructures } = this.genParams(node.params);
     out.push(`local function ${luaName}(${params})`);
+    this.emitDestructures(destructures, out, 1);
     this.genStatements(node.body.body, out, 1);
     out.push('end');
+  }
+
+  // ----------------------------------------------------------------
+  // Parameters (incl. destructured props)
+  // ----------------------------------------------------------------
+
+  /** Lower a JS parameter list to Lua. ObjectPattern params become a synthetic
+   *  `props` parameter plus `local x = props.x` destructuring statements. */
+  genParams(params) {
+    const names = [];
+    const destructures = [];
+    let synthetic = 0;
+    for (const p of params) {
+      if (p.type === 'Identifier') {
+        names.push(ident(p.name));
+      } else if (p.type === 'ObjectPattern') {
+        synthetic = synthetic + 1;
+        const pname = synthetic === 1 ? 'props' : 'props' + synthetic;
+        names.push(pname);
+        for (const prop of p.properties) {
+          if (prop.type !== 'ObjectProperty' || prop.value.type !== 'Identifier') {
+            throw new CodegenError(
+              'object destructuring params only support simple { key } (no defaults/renames)');
+          }
+          destructures.push(`local ${ident(prop.value.name)} = ${pname}.${this.objectKey(prop.key)}`);
+        }
+      } else {
+        throw new CodegenError('unsupported parameter pattern: ' + p.type);
+      }
+    }
+    return { params: names.join(', '), destructures };
+  }
+
+  emitDestructures(destructures, out, level) {
+    for (const d of destructures) this.line(out, level, d);
   }
 
   genStatements(stmts, out, level) {
@@ -265,22 +312,28 @@ export class Codegen {
   genIf(node, out, level) {
     const test = this.genExpr(node.test);
     this.line(out, level, `if ${test} then`);
-    this.genStatements(node.consequent.body, out, level + 1);
+    this.genStatementAsBlock(node.consequent, out, level + 1);
     let cur = node.alternate;
     while (cur && cur.type === 'IfStatement') {
       this.line(out, level, `elseif ${this.genExpr(cur.test)} then`);
-      this.genStatements(cur.consequent.body, out, level + 1);
+      this.genStatementAsBlock(cur.consequent, out, level + 1);
       cur = cur.alternate;
     }
     if (cur) {
-      if (cur.type === 'BlockStatement') {
-        this.line(out, level, 'else');
-        this.genStatements(cur.body, out, level + 1);
-      } else {
-        throw new CodegenError('unsupported else branch: ' + cur.type);
-      }
+      this.line(out, level, 'else');
+      this.genStatementAsBlock(cur, out, level + 1);
     }
     this.line(out, level, 'end');
+  }
+
+  /** A branch of an if/else may be a block or a single bare statement
+   *  (e.g. `if (x) return y;`) — normalize both to a statement list. */
+  genStatementAsBlock(stmt, out, level) {
+    if (stmt.type === 'BlockStatement') {
+      this.genStatements(stmt.body, out, level);
+    } else {
+      this.genStatements([stmt], out, level);
+    }
   }
 
   genVariableDeclaration(node, out, level) {
@@ -547,23 +600,20 @@ export class Codegen {
   }
 
   genFunction(node) {
-    const params = node.params.map((p) => this.genPattern(p)).join(', ');
+    const { params, destructures } = this.genParams(node.params);
     const body = [];
     if (node.body.type === 'BlockStatement') {
+      body.push(`function(${params})`);
+      this.emitDestructures(destructures, body, 1);
       this.genStatements(node.body.body, body, 1);
-      body.unshift(`function(${params})`);
       body.push('end');
     } else {
       body.push(`function(${params})`);
+      this.emitDestructures(destructures, body, 1);
       body.push('  return ' + this.genExpr(node.body));
       body.push('end');
     }
     return body.join('\n');
-  }
-
-  genPattern(node) {
-    if (node.type === 'Identifier') return ident(node.name);
-    throw new CodegenError('unsupported parameter pattern: ' + node.type);
   }
 
   // ----------------------------------------------------------------

@@ -5,18 +5,20 @@
 
 架构设计见 [docs/architecture.md](docs/architecture.md)，Tom's Peripherals GPU 的 API 契约（坐标/颜色/
 字体度量/启动顺序等，经 1.3.1 字节码验证）见 [docs/toms-gpu-api.md](docs/toms-gpu-api.md)。
-**当前状态：MVP 已实现**，满足 §14 两条验收标准：静态页面渲染 + 交互/脏矩形重绘闭环。
+**当前状态：MVP 已实现**，满足 §14 两条验收标准：静态页面渲染 + 交互/脏矩形重绘闭环；
+多文件 `import` 已支持（应用可拆多个 `.tsx`/`.ts` 文件，编译期打包进单个 Lua 模块）。
 编译产物为**模块**（`start(side)` 任务函数），由主程序经 simpleParallel 非阻塞调度（为未来网络功能兼容）。
 
 ## 目录
 
 ```
-compiler/          JSX → Lua 编译器（esbuild 擦类型 → @babel/parser AST → codegen）
+compiler/          JSX → Lua 编译器（esbuild 打包+擦类型 → @babel/parser AST → codegen）
 runtime/           框架运行时（hooks 状态槽、flexbox 布局、脏矩形渲染、事件路由、GPU 适配）
 framework/         全局 TS 类型声明（useState/useEffect/render 与 JSX 组件类型）
-demo/App.tsx       MVP 演示应用（计数器 + 条件徽章 + 动态列表）
+demo/App.tsx       演示入口（计数器 + 条件徽章 + 动态列表，import 多个组件文件）
+demo/components/   演示组件（Header / CounterControls / Badge / HistoryList）
 demo/main.lua      演示主程序（require 编译产物，经 simpleParallel 非阻塞调度 UI 任务）
-scripts/           无头测试（stub GPU + CC 环境，跑通验收标准 + 模块/并行契约）
+scripts/           无头测试（stub GPU + CC 环境：验收标准 + 模块/并行契约 + 多文件 import 用例）
 dist/ui.lua        编译产物（模块：require 后由主程序组合调度，拷进电脑即可用）
 ```
 
@@ -67,6 +69,8 @@ UI 任务在 `os.pullEvent` 处让出调度器，因此 UI 渲染不阻塞其他
 
 作者模型不变：`.tsx` 里定义组件，`render(<App/>)` 挂载根组件；编译产物是模块，
 GPU 初始化与事件循环都在 `start(side)` 里（由主程序经 simpleParallel 调用）。
+应用可以按正常 React 习惯拆成多个文件：编译器在编译期把整个应用（`import`/`export`）
+**打包**进同一个 Lua 模块，部署仍只拷一个 `ui.lua`。
 
 ```tsx
 function App() {
@@ -92,6 +96,43 @@ function App() {
 render(<App />);
 ```
 
+### 多文件（import / export）
+
+组件、工具函数、常量可以放在各自的文件里，用普通 `import` / `export` 组织（与
+`demo/` 的拆分方式一致）。编译器在 esbuild 层打包，Lua 产物仍是**单个模块**：
+
+```tsx
+// components/Header.tsx
+export function Header({ title }: { title: string }) {
+  return <Text style={{ fontSize: 3 }}>{title}</Text>;
+}
+
+// lib/format.ts —— 纯 .ts 工具模块（无 JSX）
+export const ACCENT = '#7ec8ff';
+export function pad(n: number): string { return String(n); }
+
+// App.tsx（入口，含 render）
+import { Header } from './components/Header';
+import { pad } from './lib/format';
+
+function App() {
+  const [n, setN] = useState(0);
+  return (
+    <Panel style={{ backgroundColor: '#131318' }}>
+      <Header title="cc-react" />
+      <Button label="+" onClick={() => setN(n + 1)} />
+      <Text style={{ color: ACCENT }}>{pad(n)}</Text>
+    </Panel>
+  );
+}
+
+render(<App />);
+```
+
+支持范围：命名/默认导出、跨文件 props（含事件回调）、跨文件 hooks、`.ts` 工具模块
+（常量/纯函数）、`import { X as Y }` 别名。两个文件导出**同名组件**时打包器会自动改名，
+两者互不干扰。颜色常量可从其他文件导入（`#rgb` / `#rrggbb` / `#aarrggbb` 在运行时解析）。
+
 ### 支持范围（MVP）
 
 - 组件：`Box` / `Panel` / `Text` / `Button`（也接受小写 `box` 等）
@@ -101,8 +142,9 @@ render(<App />);
 - 颜色：`#rgb` / `#rrggbb` / `#aarrggbb`，编译期转 ARGB
 - 事件：`tm_monitor_touch`（普通屏点击）与 `tm_monitor_mouse_click/up`（Bitmap 屏，含按下视觉反馈）
 - JSX 表达式：三元（真值分支）、`&&` / `||`、`.map()`（→ 运行时 `__map`）、数组展开（→ `__arr`）、模板/拼接文本
-- 单文件模块：组件必须与 `render(<App/>)` 在同一个 `.tsx` 里（多文件 import 与 keyed list 是后续里程碑）；
-  编译产物是模块，`start(side)` 作为 simpleParallel 任务被主程序调度（见「部署」）
+- 多文件 import：应用可拆成多个 `.tsx` / `.ts` 文件（`import` / `export`），编译期打包进单个 Lua 模块；
+  同名组件自动改名、跨文件 hooks/props/常量均可用（见上文「多文件」）；编译产物是模块，
+  `start(side)` 作为 simpleParallel 任务被主程序调度（见「部署」）
 
 ## 故障排查：真机黑屏（已修复 2025-08）
 
@@ -133,5 +175,6 @@ render(<App />);
   若真机 GPU 的 draw 系列实为 1-based，只需改 `runtime/runtime.lua` 中的 `DRAW_OFFSET = 0`。
 - 默认字体按 CC 5×7 计算行高（`fontSize` 为像素倍率）；真实 GPU 字体若有差异会导致轻微垂直偏差。
 - 三元表达式降级为 Lua `and/or`：假分支为 `null`/元素时正确；假分支为假值字面量时语义不保真。
+- `import` 是**编译期打包**：不支持动态 `import()` / 运行时加载；未被使用的导入会被打包器剔除。
 - 无滚动/裁剪：内容超出视口的部分不会绘制，也无法点击。
 - `useState` 状态按「组件实例 DFS 路径」存放；结构静态时稳定，条件渲染换组件会重置对应槽位（keyed list 里程碑解决）。

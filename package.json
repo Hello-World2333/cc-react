@@ -6,9 +6,10 @@
   "type": "module",
   "scripts": {
     "build": "node compiler/index.mjs demo/App.tsx dist/ui.lua",
+    "build:fixture": "node compiler/index.mjs scripts/fixtures/multi/App.tsx dist/fixture-multi.lua",
     "typecheck": "tsc --noEmit",
-    "test": "luac5.1 -p dist/ui.lua && lua5.1 scripts/test_main.lua",
-    "test:all": "npm run typecheck && npm run build && npm run test"
+    "test": "luac5.1 -p dist/ui.lua && luac5.1 -p dist/fixture-multi.lua && lua5.1 scripts/test_main.lua dist/ui.lua && lua5.1 scripts/test_multiimport.lua dist/fixture-multi.lua",
+    "test:all": "npm run typecheck && npm run build && npm run build:fixture && npm run test"
   },
   "dependencies": {
     "@babel/parser": "^7.24.0",
