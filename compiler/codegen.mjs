@@ -1,0 +1,650 @@
+/**
+ * JSX → Lua code generator.
+ *
+ * Input: a Babel AST of the esbuild-transformed entry file (TS stripped, JSX
+ * preserved, single file — no value imports in the MVP).
+ *
+ * Strategy (docs/architecture.md §5): components compile to Lua functions that
+ * build a *style tree* via node factories (__box/__text/__panel/__button).
+ * Layout and drawing happen in the embedded runtime, never in the compiled
+ * code. Generated Lua is deliberately unreadable — runtime thinness wins.
+ */
+
+const RESERVED = new Set([
+  'and', 'break', 'do', 'else', 'elseif', 'end', 'false', 'for', 'function',
+  'goto', 'if', 'in', 'local', 'nil', 'not', 'or', 'repeat', 'return', 'then',
+  'true', 'until', 'while',
+]);
+
+const HOST_FACTORIES = new Map([
+  ['box', '__box'], ['Box', '__box'],
+  ['panel', '__panel'], ['Panel', '__panel'],
+  ['text', '__text'], ['Text', '__text'],
+  ['button', '__button'], ['Button', '__button'],
+]);
+
+export class CodegenError extends Error {}
+
+export { containsJsx };
+
+function luaString(s) {
+  let out = '"';
+  for (const ch of s) {
+    const code = ch.codePointAt(0);
+    if (ch === '\\') out += '\\\\';
+    else if (ch === '"') out += '\\"';
+    else if (ch === '\n') out += '\\n';
+    else if (ch === '\r') out += '\\r';
+    else if (ch === '\t') out += '\\t';
+    else if (code < 32) out += '\\' + code;
+    else out += ch;
+  }
+  return out + '"';
+}
+
+function ident(name) {
+  return RESERVED.has(name) ? name + '_' : name;
+}
+
+function numLiteral(n) {
+  if (!Number.isFinite(n)) throw new CodegenError('non-finite number literal: ' + n);
+  return String(n);
+}
+
+function hexToArgb(hex) {
+  let h = hex.slice(1);
+  if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+  if (h.length === 6) return 0xff000000 + parseInt(h, 16);
+  if (h.length === 8) return parseInt(h, 16); // aarrggbb
+  throw new CodegenError('unsupported hex color: ' + hex);
+}
+
+function isHexColorString(s) {
+  return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(s);
+}
+
+/** Does this expression node contain JSX anywhere (component detection)? */
+function containsJsx(node) {
+  if (!node || typeof node !== 'object') return false;
+  if (node.type === 'JSXElement' || node.type === 'JSXFragment') return true;
+  if (Array.isArray(node)) return node.some(containsJsx);
+  for (const key of Object.keys(node)) {
+    if (key === 'loc' || key === 'start' || key === 'end') continue;
+    if (containsJsx(node[key])) return true;
+  }
+  return false;
+}
+
+/** Could this expression produce an element (rather than a primitive)? */
+function exprMayBeElement(node) {
+  switch (node.type) {
+    case 'JSXElement':
+    case 'JSXFragment':
+      return true;
+    case 'ConditionalExpression':
+      return exprMayBeElement(node.consequent) || exprMayBeElement(node.alternate);
+    case 'LogicalExpression':
+      return exprMayBeElement(node.left) || exprMayBeElement(node.right);
+    case 'ParenthesizedExpression':
+      return exprMayBeElement(node.expression);
+    default:
+      return false;
+  }
+}
+
+const MAPPED_FUNCS = {
+  useState: '__useState',
+  useEffect: '__useEffect',
+};
+
+/** JSX whitespace rule: text containing a newline gets its lines trimmed and
+ *  joined with single spaces; single-line text is kept verbatim. */
+function jsxTextValue(node) {
+  let v = node.value;
+  if (/[\n\r]/.test(v)) {
+    v = v
+      .split(/[\r\n]+/)
+      .map((line) => line.trim())
+      .filter((line) => line !== '')
+      .join(' ');
+  }
+  return v;
+}
+
+export class Codegen {
+  /** @param {string[]} components top-level component function names (contain JSX) */
+  constructor(components) {
+    this.components = new Set(components);
+  }
+
+  // ----------------------------------------------------------------
+  // Program / statements
+  // ----------------------------------------------------------------
+
+  generateProgram(ast) {
+    const out = [];
+    for (const stmt of ast.program.body) {
+      this.genTopLevel(stmt, out);
+    }
+    return out.join('\n');
+  }
+
+  genTopLevel(stmt, out) {
+    switch (stmt.type) {
+      case 'ImportDeclaration':
+        throw new CodegenError(
+          'imports are not supported in the MVP (single-file apps only): ' + stmt.source.value);
+      case 'ExportNamedDeclaration':
+      case 'ExportDefaultDeclaration': {
+        if (stmt.declaration) {
+          this.genTopLevel(stmt.declaration, out);
+        } else {
+          throw new CodegenError('re-export declarations are not supported');
+        }
+        return;
+      }
+      case 'FunctionDeclaration':
+        this.genFunctionDeclaration(stmt, out);
+        return;
+      case 'VariableDeclaration': {
+        // Arrow-function components: `const Foo = () => <.../>` compile to
+        // `local function render_Foo(...)` so JSX call sites can reference them.
+        const decls = [];
+        let isComponentDecl = false;
+        for (const d of stmt.declarations) {
+          if (d.id.type === 'Identifier' && d.init
+              && (d.init.type === 'ArrowFunctionExpression' || d.init.type === 'FunctionExpression')
+              && containsJsx(d.init)) {
+            isComponentDecl = true;
+          } else {
+            decls.push(d);
+          }
+        }
+        if (isComponentDecl) {
+          for (const d of stmt.declarations) {
+            if (d.id.type === 'Identifier' && d.init
+                && (d.init.type === 'ArrowFunctionExpression' || d.init.type === 'FunctionExpression')
+                && containsJsx(d.init)) {
+              this.genArrowComponent(d, out);
+            } else {
+              throw new CodegenError(
+                'a component declaration must contain only the component (mixed declarators are unsupported)');
+            }
+          }
+        } else {
+          this.genVariableDeclaration(stmt, out, 0);
+        }
+        return;
+      }
+      case 'ExpressionStatement': {
+        const expr = stmt.expression;
+        if (expr.type === 'CallExpression' && expr.callee.type === 'Identifier' && expr.callee.name === 'render') {
+          const arg = expr.arguments[0];
+          if (expr.arguments.length !== 1 || arg.type !== 'JSXElement'
+              || arg.openingElement.name.type !== 'JSXIdentifier'
+              || arg.openingElement.attributes.length > 0
+              || arg.children.some((c) => !(c.type === 'JSXText' && c.value.trim() === ''))) {
+            throw new CodegenError(
+              "render() must be called as render(<Component/>) with no props/children (MVP)");
+          }
+          const tag = arg.openingElement.name.name;
+          if (!this.components.has(tag)) {
+            throw new CodegenError(`render(<${tag}/>) but ${tag} is not a component function`);
+          }
+          out.push(`__run(render_${tag})`);
+          return;
+        }
+        out.push(this.genExpr(expr));
+        return;
+      }
+      default:
+        throw new CodegenError('unsupported top-level statement: ' + stmt.type);
+    }
+  }
+
+  genArrowComponent(decl, out) {
+    const name = decl.id.name;
+    const fn = decl.init;
+    const params = fn.params.map((p) => this.genPattern(p)).join(', ');
+    out.push(`local function render_${name}(${params})`);
+    if (fn.body.type === 'BlockStatement') {
+      this.genStatements(fn.body.body, out, 1);
+    } else {
+      out.push('  return ' + this.genExpr(fn.body));
+    }
+    out.push('end');
+  }
+
+  genFunctionDeclaration(node, out) {
+    const name = node.id && node.id.name;
+    if (!name) throw new CodegenError('anonymous top-level functions are not supported');
+    const isComponent = containsJsx(node);
+    const luaName = isComponent ? 'render_' + name : name;
+    const params = node.params.map((p) => this.genPattern(p)).join(', ');
+    out.push(`local function ${luaName}(${params})`);
+    this.genStatements(node.body.body, out, 1);
+    out.push('end');
+  }
+
+  genStatements(stmts, out, level) {
+    for (const stmt of stmts) {
+      switch (stmt.type) {
+        case 'VariableDeclaration':
+          this.genVariableDeclaration(stmt, out, level);
+          break;
+        case 'ReturnStatement': {
+          const arg = stmt.argument ? this.genExpr(stmt.argument) : '';
+          this.line(out, level, 'return' + (arg ? ' ' + arg : ''));
+          break;
+        }
+        case 'ExpressionStatement':
+          this.line(out, level, this.genExpr(stmt.expression));
+          break;
+        case 'IfStatement':
+          this.genIf(stmt, out, level);
+          break;
+        case 'BlockStatement':
+          this.genStatements(stmt.body, out, level);
+          break;
+        case 'EmptyStatement':
+          break;
+        default:
+          throw new CodegenError('unsupported statement: ' + stmt.type);
+      }
+    }
+  }
+
+  genIf(node, out, level) {
+    const test = this.genExpr(node.test);
+    this.line(out, level, `if ${test} then`);
+    this.genStatements(node.consequent.body, out, level + 1);
+    let cur = node.alternate;
+    while (cur && cur.type === 'IfStatement') {
+      this.line(out, level, `elseif ${this.genExpr(cur.test)} then`);
+      this.genStatements(cur.consequent.body, out, level + 1);
+      cur = cur.alternate;
+    }
+    if (cur) {
+      if (cur.type === 'BlockStatement') {
+        this.line(out, level, 'else');
+        this.genStatements(cur.body, out, level + 1);
+      } else {
+        throw new CodegenError('unsupported else branch: ' + cur.type);
+      }
+    }
+    this.line(out, level, 'end');
+  }
+
+  genVariableDeclaration(node, out, level) {
+    for (const decl of node.declarations) {
+      const init = decl.init ? this.genExpr(decl.init) : 'nil';
+      const pattern = decl.id;
+      if (pattern.type === 'Identifier') {
+        this.line(out, level, `local ${ident(pattern.name)} = ${init}`);
+      } else if (pattern.type === 'ArrayPattern') {
+        const names = pattern.elements.map((el) => {
+          if (!el) return '_';
+          if (el.type === 'Identifier') return ident(el.name);
+          throw new CodegenError('array destructuring only supports identifiers');
+        });
+        this.line(out, level, `local ${names.join(', ')} = ${init}`);
+      } else if (pattern.type === 'ObjectPattern') {
+        for (const prop of pattern.properties) {
+          if (prop.type !== 'ObjectProperty' || prop.value.type !== 'Identifier') {
+            throw new CodegenError('object destructuring only supports simple { key }');
+          }
+          const key = this.objectKey(prop.key);
+          this.line(out, level, `local ${ident(prop.value.name)} = ${init}.${key}`);
+        }
+      } else {
+        throw new CodegenError('unsupported variable pattern: ' + pattern.type);
+      }
+    }
+  }
+
+  line(out, level, text) {
+    out.push('  '.repeat(level) + text);
+  }
+
+  // ----------------------------------------------------------------
+  // Expressions
+  // ----------------------------------------------------------------
+
+  genExpr(node) {
+    switch (node.type) {
+      case 'NumericLiteral':
+        return numLiteral(node.value);
+      case 'StringLiteral':
+        return luaString(node.value);
+      case 'BooleanLiteral':
+        return node.value ? 'true' : 'false';
+      case 'NullLiteral':
+        return 'nil';
+      case 'Identifier':
+        return ident(node.name);
+      case 'TemplateLiteral':
+        return this.genTemplate(node);
+      case 'BinaryExpression':
+        return this.genBinary(node);
+      case 'LogicalExpression':
+        return `(${this.genExpr(node.left)} ${node.operator === '&&' ? 'and' : 'or'} ${this.genExpr(node.right)})`;
+      case 'UnaryExpression':
+        return this.genUnary(node);
+      case 'ConditionalExpression':
+        // Lua has no ternary; `and/or` is correct while the true branch is
+        // truthy (tables from JSX, numbers, strings) — fine for the MVP.
+        return `(${this.genExpr(node.test)} and ${this.genExpr(node.consequent)} or ${this.genExpr(node.alternate)})`;
+      case 'CallExpression':
+        return this.genCall(node);
+      case 'MemberExpression':
+        return this.genMember(node);
+      case 'ObjectExpression':
+        return this.genObject(node);
+      case 'ArrayExpression':
+        return this.genArray(node);
+      case 'ArrowFunctionExpression':
+      case 'FunctionExpression':
+        return this.genFunction(node);
+      case 'JSXElement':
+        return this.genJsx(node);
+      case 'JSXFragment':
+        return this.genJsxFragment(node);
+      case 'ParenthesizedExpression':
+        return this.genExpr(node.expression);
+      case 'TSAsExpression':
+      case 'TSTypeAssertion':
+      case 'TSNonNullExpression':
+        return this.genExpr(node.expression);
+      default:
+        throw new CodegenError('unsupported expression: ' + node.type);
+    }
+  }
+
+  genTemplate(node) {
+    const parts = [];
+    for (let i = 0; i < node.quasis.length; i++) {
+      const q = node.quasis[i];
+      if (q.value.cooked !== '') parts.push(luaString(q.value.cooked));
+      if (i < node.expressions.length) {
+        parts.push(`tostring(${this.genExpr(node.expressions[i])})`);
+      }
+    }
+    if (parts.length === 0) return '""';
+    if (parts.length === 1) return parts[0];
+    return `(${parts.join(' .. ')})`;
+  }
+
+  static isStringLike(node) {
+    if (!node) return false;
+    if (node.type === 'StringLiteral' || node.type === 'TemplateLiteral') return true;
+    if (node.type === 'BinaryExpression' && node.operator === '+') {
+      return Codegen.isStringLike(node.left) || Codegen.isStringLike(node.right);
+    }
+    return false;
+  }
+
+  genBinary(node) {
+    const op = node.operator;
+    switch (op) {
+      case '+':
+        if (Codegen.isStringLike(node.left) || Codegen.isStringLike(node.right)) {
+          return `(${this.genExpr(node.left)} .. ${this.genExpr(node.right)})`;
+        }
+        return `(${this.genExpr(node.left)} + ${this.genExpr(node.right)})`;
+      case '-': case '*': case '/': case '%':
+        return `(${this.genExpr(node.left)} ${op} ${this.genExpr(node.right)})`;
+      case '**':
+        return `(${this.genExpr(node.left)} ^ ${this.genExpr(node.right)})`;
+      case '==': case '===':
+        return `(${this.genExpr(node.left)} == ${this.genExpr(node.right)})`;
+      case '!=': case '!==':
+        return `(${this.genExpr(node.left)} ~= ${this.genExpr(node.right)})`;
+      case '<': case '>': case '<=': case '>=':
+        return `(${this.genExpr(node.left)} ${op} ${this.genExpr(node.right)})`;
+      default:
+        throw new CodegenError('unsupported binary operator: ' + op);
+    }
+  }
+
+  genUnary(node) {
+    const arg = this.genExpr(node.argument);
+    switch (node.operator) {
+      case '!': return `not (${arg})`;
+      case '-': return `-(${arg})`;
+      case '+': return `(${arg})`;
+      case 'typeof': throw new CodegenError('typeof is not supported');
+      default: throw new CodegenError('unsupported unary operator: ' + node.operator);
+    }
+  }
+
+  genCall(node) {
+    const args = node.arguments.map((a) => {
+      if (a.type === 'SpreadElement') throw new CodegenError('spread in call arguments is not supported');
+      return this.genExpr(a);
+    });
+    const callee = node.callee;
+
+    if (callee.type === 'Identifier') {
+      const name = callee.name;
+      if (MAPPED_FUNCS[name]) return `${MAPPED_FUNCS[name]}(${args.join(', ')})`;
+      if (name === 'String') return `tostring(${args.join(', ')})`;
+      if (name === 'Number') return `tonumber(${args.join(', ')})`;
+      if (name === 'render') throw new CodegenError('render() is only allowed at top level');
+      return `${ident(name)}(${args.join(', ')})`;
+    }
+
+    if (callee.type === 'MemberExpression') {
+      const obj = this.genMemberObject(callee);
+      const prop = callee.computed ? this.genExpr(callee.property) : callee.property.name;
+      // JS Array.prototype.map → runtime __map
+      if (!callee.computed && callee.property.type === 'Identifier' && callee.property.name === 'map') {
+        return `__map(${obj}, ${args.join(', ')})`;
+      }
+      if (!callee.computed && callee.object.type === 'Identifier' && callee.object.name === 'Math') {
+        if (prop === 'round' && args.length === 1) {
+          return `math.floor((${args[0]}) + 0.5)`;
+        }
+        const m = this.mathFunc(prop);
+        if (m) return `${m}(${args.join(', ')})`;
+      }
+      return `${obj}.${prop}(${args.join(', ')})`;
+    }
+
+    if (callee.type === 'ArrowFunctionExpression' || callee.type === 'FunctionExpression') {
+      return `(${this.genFunction(callee)})(${args.join(', ')})`;
+    }
+
+    throw new CodegenError('unsupported call callee: ' + callee.type);
+  }
+
+  mathFunc(name) {
+    switch (name) {
+      case 'floor': case 'ceil': case 'abs': case 'max': case 'min':
+        return 'math.' + name;
+      case 'round':
+        return 'math.floor'; // callers pass a single arg; add 0.5 below? keep simple:
+      default:
+        return null;
+    }
+  }
+
+  genMemberObject(node) {
+    // obj in `obj.prop(...)` / `obj[...](...)` — non-computed member call
+    return this.genExpr(node.object);
+  }
+
+  genMember(node) {
+    if (node.computed) {
+      return `${this.genExpr(node.object)}[${this.genExpr(node.property)}]`;
+    }
+    const prop = node.property.name;
+    // JS array/string `.length` → Lua length operator
+    if (prop === 'length') {
+      return `#${this.genExpr(node.object)}`;
+    }
+    if (node.object.type === 'Identifier' && node.object.name === 'Math') {
+      const m = this.mathFunc(prop);
+      if (m) return m;
+    }
+    return `${this.genExpr(node.object)}.${prop}`;
+  }
+
+  genObject(node) {
+    const parts = [];
+    for (const prop of node.properties) {
+      if (prop.type === 'SpreadElement') {
+        throw new CodegenError('object spread is not supported');
+      }
+      let value;
+      if (prop.type === 'ObjectMethod') {
+        value = this.genFunction(prop);
+      } else if (prop.type === 'ObjectProperty') {
+        value = this.genObjectValue(prop.value);
+      } else {
+        throw new CodegenError('unsupported object property: ' + prop.type);
+      }
+      parts.push(`${this.objectKey(prop.key)} = ${value}`);
+    }
+    return `{ ${parts.join(', ')} }`;
+  }
+
+  genObjectValue(node) {
+    // Hex color strings become ARGB numbers at compile time.
+    if (node.type === 'StringLiteral' && isHexColorString(node.value)) {
+      return numLiteral(hexToArgb(node.value));
+    }
+    return this.genExpr(node);
+  }
+
+  objectKey(key) {
+    if (key.type === 'Identifier') return ident(key.name);
+    if (key.type === 'StringLiteral') {
+      const name = key.value;
+      return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !RESERVED.has(name) ? name : `[${luaString(name)}]`;
+    }
+    if (key.type === 'NumericLiteral') return `[${numLiteral(key.value)}]`;
+    throw new CodegenError('unsupported object key: ' + key.type);
+  }
+
+  genArray(node) {
+    const hasSpread = node.elements.some((el) => el && el.type === 'SpreadElement');
+    if (hasSpread) {
+      const args = node.elements.map((el) => {
+        if (el && el.type === 'SpreadElement') return this.genExpr(el.argument);
+        return el ? this.genExpr(el) : 'nil';
+      });
+      return `__arr(${args.join(', ')})`;
+    }
+    return `{ ${node.elements.map((el) => (el ? this.genExpr(el) : 'nil')).join(', ')} }`;
+  }
+
+  genFunction(node) {
+    const params = node.params.map((p) => this.genPattern(p)).join(', ');
+    const body = [];
+    if (node.body.type === 'BlockStatement') {
+      this.genStatements(node.body.body, body, 1);
+      body.unshift(`function(${params})`);
+      body.push('end');
+    } else {
+      body.push(`function(${params})`);
+      body.push('  return ' + this.genExpr(node.body));
+      body.push('end');
+    }
+    return body.join('\n');
+  }
+
+  genPattern(node) {
+    if (node.type === 'Identifier') return ident(node.name);
+    throw new CodegenError('unsupported parameter pattern: ' + node.type);
+  }
+
+  // ----------------------------------------------------------------
+  // JSX
+  // ----------------------------------------------------------------
+
+  genJsx(node) {
+    const name = node.openingElement.name;
+    if (name.type !== 'JSXIdentifier') {
+      throw new CodegenError('JSX member expressions (Foo.Bar) are not supported');
+    }
+    const tag = name.name;
+    const factory = HOST_FACTORIES.get(tag);
+    if (factory) {
+      return `${factory}(${this.genJsxProps(node)})`;
+    }
+    if (/^[a-z]/.test(tag)) {
+      throw new CodegenError(
+        `unknown intrinsic element <${tag}/> (known: Box/Panel/Text/Button)`);
+    }
+    if (!this.components.has(tag)) {
+      throw new CodegenError(`<${tag}/> is used but no component function '${tag}' is defined`);
+    }
+    return `__component(${luaString(tag)}, render_${tag}, ${this.genJsxProps(node)})`;
+  }
+
+  genJsxFragment(node) {
+    const children = this.jsxChildren(node.children);
+    return `__box({ children = __children({ ${children} }) })`;
+  }
+
+  genJsxProps(node) {
+    const parts = [];
+    for (const attr of node.openingElement.attributes) {
+      if (attr.type === 'JSXSpreadAttribute') {
+        throw new CodegenError('JSX spread attributes are not supported');
+      }
+      const name = attr.name.name;
+      let value;
+      if (attr.value == null) {
+        value = 'true';
+      } else if (attr.value.type === 'StringLiteral') {
+        value = this.genObjectValue(attr.value);
+      } else if (attr.value.type === 'JSXExpressionContainer') {
+        value = this.genExpr(attr.value.expression);
+      } else if (attr.value.type === 'JSXElement') {
+        value = this.genJsx(attr.value);
+      } else {
+        throw new CodegenError('unsupported JSX attribute value: ' + attr.value.type);
+      }
+      parts.push(`${ident(name)} = ${value}`);
+    }
+
+    const children = node.children.filter((c) => !(c.type === 'JSXText' && c.value.trim() === ''));
+    const tag = node.openingElement.name.name;
+    const kind = HOST_FACTORIES.get(tag) ? tag.toLowerCase() : null;
+    if (children.length > 0) {
+      if (kind === 'text' || kind === 'button') {
+        for (const c of children) {
+          if (c.type === 'JSXExpressionContainer' && exprMayBeElement(c.expression)) {
+            throw new CodegenError(`<${tag}> children must be text (elements are not allowed inside text)`);
+          }
+        }
+        parts.push(`${kind === 'button' ? 'label' : 'text'} = ${this.genTextConcat(children)}`);
+      } else {
+        parts.push(`children = __children({ ${this.jsxChildren(children)} })`);
+      }
+    }
+    return `{ ${parts.join(', ')} }`;
+  }
+
+  jsxChildren(children) {
+    return children
+      .filter((c) => !(c.type === 'JSXText' && c.value.trim() === ''))
+      .map((c) => {
+        if (c.type === 'JSXText') return luaString(jsxTextValue(c));
+        if (c.type === 'JSXExpressionContainer') return this.genExpr(c.expression);
+        return this.genJsx(c);
+      })
+      .join(', ');
+  }
+
+  genTextConcat(children) {
+    const parts = children.map((c) => {
+      if (c.type === 'JSXText') return luaString(jsxTextValue(c));
+      if (c.type === 'JSXExpressionContainer') return `tostring(${this.genExpr(c.expression)})`;
+      throw new CodegenError('unexpected child inside text: ' + c.type);
+    });
+    if (parts.length === 1) return parts[0];
+    return `(${parts.join(' .. ')})`;
+  }
+}
