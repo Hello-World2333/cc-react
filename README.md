@@ -18,7 +18,7 @@ framework/         全局 TS 类型声明（useState/useEffect/render 与 JSX �
 demo/App.tsx       演示入口（计数器 + 条件徽章 + 动态列表，import 多个组件文件）
 demo/components/   演示组件（Header / CounterControls / Badge / HistoryList）
 demo/main.lua      演示主程序（require 编译产物，经 simpleParallel 非阻塞调度 UI 任务）
-scripts/           无头测试（stub GPU + CC 环境：验收标准 + 模块/并行契约 + 多文件 import 用例）
+scripts/           无头测试（stub GPU + CC 环境：验收标准 + 模块/并行契约 + 多文件 import + 滚动用例）
 dist/ui.lua        编译产物（模块：require 后由主程序组合调度，拷进电脑即可用）
 ```
 
@@ -135,12 +135,15 @@ render(<App />);
 
 ### 支持范围（MVP）
 
-- 组件：`Box` / `Panel` / `Text` / `Button`（也接受小写 `box` 等）
+- 组件：`Box` / `Panel` / `Text` / `Button` / `Scroll`（滚动容器，也接受小写 `scroll` 等）
 - hooks：`useState`（含函数式更新）、`useEffect`（依赖数组比对）
 - 布局：flexbox 子集 —— `flexDirection`（默认 column）、`justifyContent`、`alignItems`（含 stretch）、
   `gap`、`margin` / `padding`（数值或四边对象，支持 `marginTop` 等单边）、固定尺寸 / 内容尺寸 / `width: '100%'`
 - 颜色：`#rgb` / `#rrggbb` / `#aarrggbb`，编译期转 ARGB
 - 事件：`tm_monitor_touch`（普通屏点击）与 `tm_monitor_mouse_click/up`（Bitmap 屏，含按下视觉反馈）
+- 滚动：`<Scroll>` 容器 —— 内容按完整尺寸布局、视口裁剪（不越界绘制），
+  滚轮（`tm_monitor_mouse_scroll`，方向语义与真机一致：向下滚动 dir=+1）与触摸拖拽滚动；
+  `scrollStep` 控制步长（默认 8px = 一个 5×8 行）；滚动偏移按路径持久化、两端自动钳制
 - JSX 表达式：三元（真值分支）、`&&` / `||`、`.map()`（→ 运行时 `__map`）、数组展开（→ `__arr`）、模板/拼接文本
 - 多文件 import：应用可拆成多个 `.tsx` / `.ts` 文件（`import` / `export`），编译期打包进单个 Lua 模块；
   同名组件自动改名、跨文件 hooks/props/常量均可用（见上文「多文件」）；编译产物是模块，
@@ -177,4 +180,7 @@ render(<App />);
 - 三元表达式降级为 Lua `and/or`：假分支为 `null`/元素时正确；假分支为假值字面量时语义不保真。
 - `import` 是**编译期打包**：不支持动态 `import()` / 运行时加载；未被使用的导入会被打包器剔除。
 - 无滚动/裁剪：内容超出视口的部分不会绘制，也无法点击。
+  **已实现（2025-08）**：`<Scroll>` 容器提供视口裁剪 + 滚轮/拖拽滚动，见「支持范围」。
+  已知取舍：滚动内容越过滚动边界的那一行文字会整行出现/消失（字形无法逐像素裁剪，
+  纵向按行裁剪）；`scrollStep` 建议设为内容行距（如行高 + gap），滚动时边界行最平滑。
 - `useState` 状态按「组件实例 DFS 路径」存放；结构静态时稳定，条件渲染换组件会重置对应槽位（keyed list 里程碑解决）。

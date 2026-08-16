@@ -73,6 +73,9 @@ local FULL_REPAINT_RATIO = 0.4
 -- Extra margin added to every dirty rect: covers glyphs that draw a pixel or
 -- two beyond their measured box (sub-pixel centering, font metric rounding).
 local DIRTY_PAD = 2
+-- Upper bound for measuring scroll content in the scroll axis (far beyond any
+-- CC screen; "100%" children along the scroll axis are user error).
+local SCROLL_MAX = 100000
 
 local COLOR_BG   = 0xFF0E0E12
 local COLOR_TEXT = 0xFFFFFFFF
@@ -108,32 +111,45 @@ function __gpu.getSize()
   return gpu.getSize()
 end
 
--- Clamp a 1-based box to the viewport. The GPU throws "Out of boundary" when
--- x or y is < 1, and (unlike filledRectangle) drawText throws when the text
--- would extend past the right/bottom edge — so anything off-screen is skipped.
-function __gpu.filledRectangle(x, y, w, h, c)
-  if w <= 0 or h <= 0 then return end
+-- Intersect a draw box with the viewport AND an optional clip rect (the
+-- visible part of a scroll container). Returns 1-based inclusive edges
+-- x1, y1, x2, y2, or nil when nothing survives.
+local function __clipBox(x, y, w, h, clip)
   local x1, y1 = x, y
   local x2, y2 = x + w - 1, y + h - 1
   if x1 < 1 then x1 = 1 end
   if y1 < 1 then y1 = 1 end
   if x2 > __viewportW then x2 = __viewportW end
   if y2 > __viewportH then y2 = __viewportH end
-  if x1 > x2 or y1 > y2 then return end
+  if clip then
+    local cx2 = clip.x + clip.w - 1
+    local cy2 = clip.y + clip.h - 1
+    if x1 < clip.x then x1 = clip.x end
+    if y1 < clip.y then y1 = clip.y end
+    if x2 > cx2 then x2 = cx2 end
+    if y2 > cy2 then y2 = cy2 end
+  end
+  if x1 > x2 or y1 > y2 then return nil end
+  return x1, y1, x2, y2
+end
+
+-- Clamp a 1-based box to the viewport (and an optional scroll clip). The GPU
+-- throws "Out of boundary" when x or y is < 1, and (unlike filledRectangle)
+-- drawText throws when the text would extend past the right/bottom edge — so
+-- anything off-screen is skipped.
+function __gpu.filledRectangle(x, y, w, h, c, clip)
+  if w <= 0 or h <= 0 then return end
+  local x1, y1, x2, y2 = __clipBox(x, y, w, h, clip)
+  if x1 == nil then return end
   gpu.filledRectangle(x1, y1, x2 - x1 + 1, y2 - y1 + 1, __color(c))
 end
-function __gpu.rectangle(x, y, w, h, c)
+function __gpu.rectangle(x, y, w, h, c, clip)
   if w <= 0 or h <= 0 then return end
-  local x1, y1 = x, y
-  local x2, y2 = x + w - 1, y + h - 1
-  if x1 < 1 then x1 = 1 end
-  if y1 < 1 then y1 = 1 end
-  if x2 > __viewportW then x2 = __viewportW end
-  if y2 > __viewportH then y2 = __viewportH end
-  if x1 > x2 or y1 > y2 then return end
+  local x1, y1, x2, y2 = __clipBox(x, y, w, h, clip)
+  if x1 == nil then return end
   gpu.rectangle(x1, y1, x2 - x1 + 1, y2 - y1 + 1, __color(c))
 end
-function __gpu.drawText(x, y, t, fg, bg, size, pad)
+function __gpu.drawText(x, y, t, fg, bg, size, pad, clip)
   -- Skip entirely if the text would extend past the screen edge (drawText
   -- throws "Out of boundary" instead of clipping).
   if x < 1 or y < 1 then return end
@@ -148,6 +164,34 @@ function __gpu.drawText(x, y, t, fg, bg, size, pad)
   -- (int) cast (MathHelper.floor does d2i).
   local fg2 = fg ~= nil and __color(fg) or COLOR_TEXT
   local bg2 = bg ~= nil and __color(bg) or -1
+  if clip then
+    -- A glyph row cannot be clipped part-way (drawText paints whole glyphs):
+    -- the row must fit vertically inside the clip. Horizontally we split the
+    -- string into the visible char span (per-char advance via getTextLength).
+    if y < clip.y or y + th - 1 > clip.y + clip.h - 1 then return end
+    if x >= clip.x and x + tw - 1 <= clip.x + clip.w - 1 then
+      gpu.drawText(x, y, t, fg2, bg2, fs, tp)
+      return
+    end
+    local a, b = nil, nil
+    local cum = 0
+    for i = 1, #t do
+      local cw = gpu.getTextLength(t:sub(i, i), fs, tp)
+      local startX = x + cum
+      local endX = startX + cw - 1
+      if a == nil and startX >= clip.x then a = i end
+      if a then
+        if endX > clip.x + clip.w - 1 then b = i - 1 break end
+        b = i
+      end
+      cum = cum + cw
+    end
+    if a == nil or (b ~= nil and b < a) then return end
+    if b == nil then b = #t end
+    local off = a > 1 and gpu.getTextLength(t:sub(1, a - 1), fs, tp) or 0
+    gpu.drawText(x + off, y, t:sub(a, b), fg2, bg2, fs, tp)
+    return
+  end
   gpu.drawText(x, y, t, fg2, bg2, fs, tp)
 end
 function __gpu.getTextLength(t, size, pad)
@@ -245,6 +289,8 @@ local function __makeNode(kind, props, defaults)
     path = nil,
     pressed = false,
     x = 0, y = 0, w = 0, h = 0,
+    -- scroll viewport: content size + current offset (set during layout)
+    scrollX = 0, scrollY = 0, contentW = 0, contentH = 0,
   }
   return node
 end
@@ -270,6 +316,16 @@ local function __button(props)
     padding = 6,
     fontSize = 1,
   })
+end
+
+-- Scrollable viewport: children are laid out at their FULL content size and
+-- clipped to this box; scrollX/scrollY (internal state keyed by node path)
+-- pan the content. Scrolled by tm_monitor_mouse_scroll (wheel) and by touch
+-- drag (tm_monitor_mouse_click + _drag). Style: height/width fix the viewport
+-- (auto = fill the parent's inner box), scrollStep = px per wheel notch
+-- (default 8 = one 5x8 text row), flexDirection = scroll axis (column default).
+local function __scroll(props)
+  return __makeNode("scroll", props, {})
 end
 
 -- Normalize JSX children into a flat array of nodes.
@@ -344,6 +400,7 @@ local __renderQueued = false
 local __pressedPath = nil
 local __rootFn = nil
 local __lastTree = nil
+local __scrollState = {}  -- __scrollState[path] = { x, y, maxX, maxY } (scroll viewport offsets)
 
 local function __scheduleRender()
   __renderQueued = true
@@ -434,6 +491,12 @@ local function __measure(node, maxW, maxH)
     local str = kind == "text" and (node.text or "") or (node.label or "")
     cw = __gpu.getTextLength(str, fs, tp)
     ch = FONT_H * fs
+  elseif kind == "scroll" then
+    -- The scroll node is a viewport: auto-sizes to the parent's inner box
+    -- (explicit width/height still win). Its CONTENT is measured unbounded in
+    -- the scroll axis during __layoutScroll.
+    cw = __resolveSize(s.width, maxW, maxW)
+    ch = __resolveSize(s.height, maxH, maxH)
   else
     local dir = s.flexDirection or "column"
     local gap = s.gap or 0
@@ -464,12 +527,110 @@ local function __measure(node, maxW, maxH)
   return cw + s.paddingL + s.paddingR, ch + s.paddingT + s.paddingB
 end
 
-local function __layout(node, x, y, w, h)
+-- Forward declaration: __layoutScroll (defined first) calls __layout and
+-- __layout dispatches into __layoutScroll — a circular reference, so the
+-- local must be declared before both.
+local __layout
+
+-- Lay out the CONTENT of a scroll node. Children are measured and placed in
+-- content space (unbounded along the scroll axis), then translated by the
+-- scroll offset into screen coordinates — content scrolled out of the
+-- viewport lands outside node's box, where drawing clips it away. Also
+-- computes the content size and clamps the stored scroll offset.
+local function __layoutScroll(node)
+  local s = node.style
+  local st = __scrollState[node.path]
+  if st == nil then st = { x = 0, y = 0, maxX = 0, maxY = 0 } __scrollState[node.path] = st end
+  local dir = s.flexDirection or "column"
+  local innerX = node.x + s.paddingL
+  local innerY = node.y + s.paddingT
+  local innerW = math.max(0, node.w - s.paddingL - s.paddingR)
+  local innerH = math.max(0, node.h - s.paddingT - s.paddingB)
+  local align = s.alignItems or "flex-start"
+  local gap = s.gap or 0
+  local n = #node.children
+
+  -- pass 1: measure children in content space; track the content extent
+  local items = {}
+  local cursor = 0
+  local contentW, contentH = 0, 0
+  for i = 1, n do
+    local c = node.children[i]
+    local mw, mh
+    if dir == "column" then mw, mh = __measure(c, innerW, SCROLL_MAX)
+    else mw, mh = __measure(c, SCROLL_MAX, innerH) end
+    local mt, mr, mb, ml = c.style.marginT, c.style.marginR, c.style.marginB, c.style.marginL
+    local cw = __resolveSize(c.style.width, mw, math.max(0, innerW - ml - mr)) + ml + mr
+    local ch = __resolveSize(c.style.height, mh, math.max(0, innerH - mt - mb)) + mt + mb
+    if align == "stretch" then
+      if dir == "row" and c.style.height == nil then ch = innerH end
+      if dir == "column" and c.style.width == nil then cw = innerW end
+    end
+    items[i] = { node = c, w = cw, h = ch }
+    if dir == "column" then
+      if cw > contentW then contentW = cw end
+      if cursor + ch > contentH then contentH = cursor + ch end
+      cursor = cursor + ch + gap
+    else
+      if ch > contentH then contentH = ch end
+      if cursor + cw > contentW then contentW = cursor + cw end
+      cursor = cursor + cw + gap
+    end
+  end
+
+  -- clamp the scroll offset against the current content size
+  local maxX = math.max(0, contentW - innerW)
+  local maxY = math.max(0, contentH - innerH)
+  local sx, sy = st.x or 0, st.y or 0
+  if sx < 0 then sx = 0 elseif sx > maxX then sx = maxX end
+  if sy < 0 then sy = 0 elseif sy > maxY then sy = maxY end
+  st.x, st.y, st.maxX, st.maxY = sx, sy, maxX, maxY
+  node.scrollX, node.scrollY = sx, sy
+  node.contentW, node.contentH = contentW, contentH
+
+  -- pass 2: place children at screen coords = content coords - scroll offset
+  local cur = 0
+  for i = 1, n do
+    local it = items[i]
+    local c = it.node
+    local mt, mr, mb, ml = c.style.marginT, c.style.marginR, c.style.marginB, c.style.marginL
+    local cx, cy
+    if dir == "column" then
+      if align == "flex-start" or align == "stretch" then
+        cx = 0
+      elseif align == "center" then
+        cx = (innerW - it.w) / 2
+      else -- flex-end
+        cx = innerW - it.w
+      end
+      cy = cur
+      cur = cur + it.h + gap
+    else
+      if align == "flex-start" or align == "stretch" then
+        cy = 0
+      elseif align == "center" then
+        cy = (innerH - it.h) / 2
+      else -- flex-end
+        cy = innerH - it.h
+      end
+      cx = cur
+      cur = cur + it.w + gap
+    end
+    __layout(c, innerX + cx + ml - sx, innerY + cy + mt - sy, it.w - ml - mr, it.h - mt - mb)
+  end
+end
+
+__layout = function(node, x, y, w, h)
   local s = node.style
   node.x = math.floor(x + 0.5)
   node.y = math.floor(y + 0.5)
   node.w = math.floor(w + 0.5)
   node.h = math.floor(h + 0.5)
+
+  if node.kind == "scroll" then
+    __layoutScroll(node)
+    return
+  end
 
   local innerX = node.x + s.paddingL
   local innerY = node.y + s.paddingT
@@ -553,6 +714,11 @@ local function __assignPaths(node, path, parent)
   node.path = path
   node.parent = parent
   node.pressed = node.path == __pressedPath
+  if node.kind == "scroll" then
+    local st = __scrollState[path]
+    if st == nil then st = { x = 0, y = 0, maxX = 0, maxY = 0 } __scrollState[path] = st end
+    node.scrollX, node.scrollY = st.x, st.y
+  end
   local children = node.children
   for i = 1, #children do
     __assignPaths(children[i], path .. "." .. i, node)
@@ -653,9 +819,27 @@ local function __rootBg()
   return (t and t.style and t.style.backgroundColor) or COLOR_BG
 end
 
+-- Intersect an existing clip rect with another rect (the scroll viewport).
+-- Returns a new clip table, or nil when empty (nothing visible).
+local function __clipIntersect(clip, x, y, w, h)
+  local x1, y1, x2, y2 = x, y, x + w - 1, y + h - 1
+  if clip then
+    local cx2 = clip.x + clip.w - 1
+    local cy2 = clip.y + clip.h - 1
+    if x1 < clip.x then x1 = clip.x end
+    if y1 < clip.y then y1 = clip.y end
+    if x2 > cx2 then x2 = cx2 end
+    if y2 > cy2 then y2 = cy2 end
+  end
+  if x1 > x2 or y1 > y2 then return nil end
+  return { x = x1, y = y1, w = x2 - x1 + 1, h = y2 - y1 + 1 }
+end
+
 -- Draw one node and its whole subtree (used for full repaints and for nodes
 -- intersecting a dirty rect — overdraw of unchanged content is idempotent).
-local function __drawNode(node)
+-- `clip` (nil = whole viewport) bounds the draw: scroll containers narrow it
+-- to their viewport box, so scrolled-out content never paints outside.
+local function __drawNode(node, clip)
   local s = node.style
   local w, h = node.w, node.h
   if w <= 0 or h <= 0 then return end
@@ -663,15 +847,15 @@ local function __drawNode(node)
   if node.kind == "button" and node.pressed and s.pressedColor then
     fill = s.pressedColor
   end
-  if fill then __gpu.filledRectangle(node.x, node.y, w, h, fill) end
+  if fill then __gpu.filledRectangle(node.x, node.y, w, h, fill, clip) end
   if s.borderColor then
-    __gpu.rectangle(node.x, node.y, w, h, s.borderColor)
+    __gpu.rectangle(node.x, node.y, w, h, s.borderColor, clip)
   end
   if node.kind == "text" then
     if node.text and #node.text > 0 then
       __gpu.drawText(
         node.x + s.paddingL, node.y + s.paddingT, node.text,
-        s.color or COLOR_TEXT, s.textBackgroundColor, s.fontSize or 1, s.textPadding or 1)
+        s.color or COLOR_TEXT, s.textBackgroundColor, s.fontSize or 1, s.textPadding or 1, clip)
     end
   elseif node.kind == "button" then
     local fs = s.fontSize or 1
@@ -681,10 +865,21 @@ local function __drawNode(node)
     local th = FONT_H * fs
     local tx = math.floor(node.x + (w - tw) / 2 + 0.5)
     local ty = math.floor(node.y + (h - th) / 2 + 0.5)
-    __gpu.drawText(tx, ty, label, s.color or COLOR_TEXT, fill, fs, tp)
+    __gpu.drawText(tx, ty, label, s.color or COLOR_TEXT, fill, fs, tp, clip)
   end
   local children = node.children
-  for i = 1, #children do __drawNode(children[i]) end
+  if node.kind == "scroll" then
+    -- children are clipped to the scroll viewport (intersected with the
+    -- parent clip, so nested scrolls compose)
+    local vx = node.x + s.paddingL
+    local vy = node.y + s.paddingT
+    local vw2 = math.max(0, node.w - s.paddingL - s.paddingR)
+    local vh2 = math.max(0, node.h - s.paddingT - s.paddingB)
+    local cclip = __clipIntersect(clip, vx, vy, vw2, vh2)
+    for i = 1, #children do __drawNode(children[i], cclip) end
+  else
+    for i = 1, #children do __drawNode(children[i], clip) end
+  end
 end
 
 local function __intersectsAnyRect(node, rects)
@@ -700,7 +895,7 @@ end
 
 local function __drawFull(tree)
   __gpu.fill(__rootBg())
-  __drawNode(tree)
+  __drawNode(tree, nil)
 end
 
 local function __drawDirty(tree, rects)
@@ -713,7 +908,7 @@ local function __drawDirty(tree, rects)
     for i = 1, #children do
       local c = children[i]
       if __intersectsAnyRect(c, rects) then
-        __drawNode(c) -- whole subtree; children are covered
+        __drawNode(c, nil) -- whole subtree; children are covered
       else
         walk(c)
       end
@@ -785,6 +980,38 @@ local function __findHandler(node, key)
   return nil
 end
 
+-- Closest scroll container an event hit belongs to (the hit itself included).
+local function __findScrollAncestor(node)
+  while node do
+    if node.kind == "scroll" then return node end
+    node = node.parent
+  end
+  return nil
+end
+
+-- How far a pointer may move before a press counts as a drag instead of a tap
+-- (suppresses the click that would otherwise fire on mouse_up).
+local DRAG_TAP_SLOP = 4
+local __scrollDrag = nil -- { path, x, y, moved, total } — active touch drag on a scroll
+
+local function __scrollBy(sc, dx, dy)
+  local st = __scrollState[sc.path]
+  if st == nil then return end
+  local nx, ny = st.x, st.y
+  if dx ~= 0 then
+    nx = st.x + dx
+    if nx < 0 then nx = 0 elseif nx > st.maxX then nx = st.maxX end
+  end
+  if dy ~= 0 then
+    ny = st.y + dy
+    if ny < 0 then ny = 0 elseif ny > st.maxY then ny = st.maxY end
+  end
+  if nx ~= st.x or ny ~= st.y then
+    st.x, st.y = nx, ny
+    __scheduleRender()
+  end
+end
+
 -- CC peripheral events carry the attachment name as the first payload arg.
 local function __eventArgs(e)
   if type(e[2]) == "string" then return 3 end
@@ -806,23 +1033,69 @@ local function __handleEvent(e)
     local i = __eventArgs(e)
     local x, y, btn = e[i], e[i + 1], e[i + 2]
     if type(x) == "number" and type(y) == "number" and (btn == nil or btn == 1) then
-      local h = __findHandler(__hitTest(x, y), "onClick")
+      local hit = __hitTest(x, y)
+      local h = __findHandler(hit, "onClick")
       if h then
         __pressedPath = h.path
         __scheduleRender() -- repaint the pressed visual
+      end
+      -- a press over a scroll container starts a potential touch drag
+      local sc = __findScrollAncestor(hit)
+      if sc then
+        __scrollDrag = { path = sc.path, x = x, y = y, moved = false }
+      end
+    end
+  elseif name == "tm_monitor_mouse_drag" then
+    local i = __eventArgs(e)
+    local x, y, btn = e[i], e[i + 1], e[i + 2]
+    if __scrollDrag and type(x) == "number" and type(y) == "number"
+       and (btn == nil or btn == 1) then
+      local sc = __scrollState[__scrollDrag.path]
+      if sc then
+        local dx = x - __scrollDrag.x
+        local dy = y - __scrollDrag.y
+        if dx ~= 0 or dy ~= 0 then
+          -- accumulate total travel: several small moves still count as a drag
+          __scrollDrag.total = (__scrollDrag.total or 0) + math.abs(dx) + math.abs(dy)
+          if __scrollDrag.total > DRAG_TAP_SLOP then __scrollDrag.moved = true end
+          -- content follows the finger: scrollBy(-delta)
+          __scrollBy({ path = __scrollDrag.path }, -dx, -dy)
+          __scrollDrag.x, __scrollDrag.y = x, y
+        end
       end
     end
   elseif name == "tm_monitor_mouse_up" then
     local i = __eventArgs(e)
     local x, y, btn = e[i], e[i + 1], e[i + 2]
-    if __pressedPath and type(x) == "number" and type(y) == "number"
+    if type(x) == "number" and type(y) == "number"
        and (btn == nil or btn == 1) then
-      local h = __findHandler(__hitTest(x, y), "onClick")
-      if h and h.path == __pressedPath and h.onClick then
-        h.onClick()
+      -- a drag that actually moved cancels the tap's click
+      local wasDrag = __scrollDrag ~= nil and __scrollDrag.moved
+      __scrollDrag = nil
+      if __pressedPath then
+        if not wasDrag then
+          local h = __findHandler(__hitTest(x, y), "onClick")
+          if h and h.path == __pressedPath and h.onClick then
+            h.onClick()
+          end
+        end
+        __pressedPath = nil
+        __scheduleRender()
       end
-      __pressedPath = nil
-      __scheduleRender()
+    end
+  elseif name == "tm_monitor_mouse_scroll" then
+    local i = __eventArgs(e)
+    local x, y, dir = e[i], e[i + 1], e[i + 2]
+    if type(x) == "number" and type(y) == "number"
+       and type(dir) == "number" and dir ~= 0 then
+      local sc = __findScrollAncestor(__hitTest(x, y))
+      if sc then
+        -- Real-device convention (verified in source): Minecraft wheel delta
+        -- < 0 (wheel down) maps to dir = +1, wheel up to dir = -1 — so a
+        -- positive dir scrolls the content down (scrollY increases).
+        local step = sc.style.scrollStep or 8
+        __scrollBy(sc, 0, dir * step)
+      end
     end
   end
   -- keyboard (tm_keyboard_*) is a follow-up milestone (Input + focus)

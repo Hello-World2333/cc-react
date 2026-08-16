@@ -208,6 +208,139 @@ boot({
   },
 })
 
+print("== scroll container (Scroll: layout, clip, wheel, clamp, drag) ==")
+local function scrollNode()
+  return findNodes(t.uiMod.getTree(), function(n) return n.kind == "scroll" end)[1]
+end
+local function historyRows()
+  return findNodes(t.uiMod.getTree(), function(n)
+    return n.kind == "text" and n.text:sub(1, 1) == "#"
+  end)
+end
+-- wheel event over the scroll viewport; dir follows the real device
+-- convention (verified in Tom's Peripherals source): dir=+1 = wheel down.
+local function wheelOverScroll(dir)
+  return function()
+    local sc = scrollNode()
+    return { "tm_monitor_mouse_scroll", "mon_0", sc.x + 10, sc.y + 10, dir }
+  end
+end
+
+boot({
+  -- 12 records: content (140px) overflows the 96px viewport
+  { eventFn = clickButton("Record") },
+  { eventFn = clickButton("Record") },
+  { eventFn = clickButton("Record") },
+  { eventFn = clickButton("Record") },
+  { eventFn = clickButton("Record") },
+  { eventFn = clickButton("Record") },
+  { eventFn = clickButton("Record") },
+  { eventFn = clickButton("Record") },
+  { eventFn = clickButton("Record") },
+  { eventFn = clickButton("Record") },
+  { eventFn = clickButton("Record") },
+  { eventFn = clickButton("Record") },
+  {
+    snapshot = function()
+      local sc = scrollNode()
+      check(sc ~= nil, "scroll container present after 12 records")
+      check(sc.scrollY == 0 and sc.scrollX == 0, "scroll starts at offset 0")
+      check(sc.contentH == 140, "content height is the full list height (" .. tostring(sc.contentH) .. ")")
+      check(sc.contentH - sc.h == 44, "scroll range is content - viewport (44px)")
+      local rows = historyRows()
+      check(#rows == 12, "12 rows in the tree")
+      check(rows[1].y == sc.y, "first row at the top of the viewport")
+      -- (pixel-level clipping at the fold is asserted by the dedicated scroll
+      -- fixture — scripts/test_scroll.lua; in the demo the fold lies below
+      -- the 192px screen, so scrolled-out rows are off-screen anyway)
+    end,
+  },
+  -- wheel down one notch → content scrolls up by scrollStep (8px)
+  { eventFn = wheelOverScroll(1) },
+  {
+    snapshot = function()
+      local sc = scrollNode()
+      check(sc.scrollY == 8, "wheel down scrolls by scrollStep (8px)")
+      local rows = historyRows()
+      check(rows[1].y == sc.y - 8, "first row moved up by 8px")
+      -- the strip the first row vacated shows the panel background again
+      local ref = stub.buf[sc.y - 1][sc.x - 5]
+      local px = stub.buf[sc.y - 1][rows[1].x + 1] -- was row-1 text at offset 0
+      check(px == ref, "scrolled-away row repainted to background (no residue)")
+    end,
+  },
+  -- five more notches: 8+40=48 → clamped at maxY=44
+  { eventFn = wheelOverScroll(1) },
+  { eventFn = wheelOverScroll(1) },
+  { eventFn = wheelOverScroll(1) },
+  { eventFn = wheelOverScroll(1) },
+  { eventFn = wheelOverScroll(1) },
+  {
+    snapshot = function()
+      local sc = scrollNode()
+      check(sc.scrollY == 44, "scroll clamps at the end (maxY=44)")
+      local rows = historyRows()
+      check(rows[1].y == sc.y - 44, "first row is 44px above the viewport top")
+      check(rows[12].y + rows[12].h - 1 <= sc.y + sc.h - 1, "last row visible at max scroll")
+    end,
+  },
+  -- wheel up ten times → clamped back at 0
+  { eventFn = wheelOverScroll(-1) },
+  { eventFn = wheelOverScroll(-1) },
+  { eventFn = wheelOverScroll(-1) },
+  { eventFn = wheelOverScroll(-1) },
+  { eventFn = wheelOverScroll(-1) },
+  { eventFn = wheelOverScroll(-1) },
+  { eventFn = wheelOverScroll(-1) },
+  { eventFn = wheelOverScroll(-1) },
+  { eventFn = wheelOverScroll(-1) },
+  { eventFn = wheelOverScroll(-1) },
+  {
+    snapshot = function()
+      local sc = scrollNode()
+      check(sc.scrollY == 0, "scroll clamps at the start (0)")
+      local rows = historyRows()
+      check(rows[1].y == sc.y, "first row back at the top")
+    end,
+  },
+  -- a plain tap inside the scroll (click + up, no movement) does not scroll;
+  -- the demo's scroll mostly hangs below the 192px test screen, so the tap
+  -- uses the small on-screen strip at its top (drag + click-through tests
+  -- live in scripts/test_scroll.lua where the viewport is fully visible)
+  {
+    eventFn = function()
+      local sc = scrollNode()
+      return { "tm_monitor_mouse_click", "mon_0", sc.x + 10, sc.y + 10, 1 }
+    end,
+  },
+  {
+    eventFn = function()
+      local sc = scrollNode()
+      return { "tm_monitor_mouse_up", "mon_0", sc.x + 10, sc.y + 10, 1 }
+    end,
+  },
+  {
+    snapshot = function()
+      local sc = scrollNode()
+      check(sc.scrollY == 0, "a plain tap does not scroll")
+    end,
+  },
+  -- wheel over a visible child row still scrolls the container (ancestor
+  -- lookup through the hit node)
+  {
+    eventFn = function()
+      local rows = historyRows()
+      return { "tm_monitor_mouse_scroll", "mon_0", rows[1].x + 2, rows[1].y + 2, 1 }
+    end,
+  },
+  {
+    snapshot = function()
+      local sc = scrollNode()
+      check(sc.scrollY == 8, "wheel over a row scrolls the container (8px)")
+    end,
+  },
+})
+
 print("== fresh boot starts clean ==")
 boot({})
 local countText = findText(t.uiMod.getTree(), "Count:")

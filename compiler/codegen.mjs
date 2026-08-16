@@ -22,6 +22,7 @@ const HOST_FACTORIES = new Map([
   ['panel', '__panel'], ['Panel', '__panel'],
   ['text', '__text'], ['Text', '__text'],
   ['button', '__button'], ['Button', '__button'],
+  ['scroll', '__scroll'], ['Scroll', '__scroll'],
 ]);
 
 export class CodegenError extends Error {}

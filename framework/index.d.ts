@@ -33,6 +33,7 @@ declare var Box: (props: JSX.BoxProps) => JSX.Element;
 declare var Panel: (props: JSX.BoxProps) => JSX.Element;
 declare var Text: (props: JSX.TextProps) => JSX.Element;
 declare var Button: (props: JSX.ButtonProps) => JSX.Element;
+declare var Scroll: (props: JSX.ScrollProps) => JSX.Element;
 
 declare namespace JSX {
   interface Element {}
@@ -59,6 +60,8 @@ declare namespace JSX {
     borderColor?: string;
     /** Pressed background for buttons (needs tm_monitor_mouse_click/up). */
     pressedColor?: string;
+    /** Scroll only: px per mouse-wheel notch (default 8 = one 5x8 row). */
+    scrollStep?: number;
   }
 
   interface BoxProps {
@@ -83,6 +86,14 @@ declare namespace JSX {
     onMouseUp?: () => void;
   }
 
+  interface ScrollProps {
+    style?: Style;
+    children?: JSX.Element | JSX.Element[] | null | false;
+    onClick?: () => void;
+    onMouseDown?: () => void;
+    onMouseUp?: () => void;
+  }
+
   interface IntrinsicElements {
     box: BoxProps;
     Box: BoxProps;
@@ -92,5 +103,7 @@ declare namespace JSX {
     Text: TextProps;
     button: ButtonProps;
     Button: ButtonProps;
+    scroll: ScrollProps;
+    Scroll: ScrollProps;
   }
 }

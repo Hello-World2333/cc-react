@@ -215,12 +215,21 @@ MVP 已按本文档落地，代码布局见仓库根目录 README。与本文档
   字符前进量 = (charWidth + padding) × size，padding 默认 **1px**（字符间距）；文字高度 = 8px×fontSize
   （padding 不影响高度）。`__measure` 返回完整盒尺寸（内容 + 自身 padding），auto 尺寸容器正确计入 padding。
   脏矩形各向外扩 2px 以覆盖字形越界残留。
+- **滚动（2025-08）**：新增 `<Scroll>` 宿主组件（`__scroll` 节点）。内容按**完整尺寸**布局
+  （滚动轴方向以 `SCROLL_MAX` 为界测量），再按滚动偏移平移进屏幕坐标——滚出视口的内容落在
+  容器 box 之外，绘制时被**裁剪**：`__gpu.*` 适配层增加 clip 参数（矩形裁剪、文字按字符宽度
+  子区间拆分），`__drawNode` 对 scroll 节点的子树收窄到其视口 box（嵌套 scroll 自动组合）。
+  滚动偏移存于 `__scrollState[path]`（按节点路径持久化，`__layoutScroll` 每次按当前内容尺寸
+  钳制）。交互：`tm_monitor_mouse_scroll`（方向语义经源码验证：Minecraft 滚轮 delta<0 →
+  dir=+1 = 向下滚动，`scrollStep` 默认 8px）与触摸拖拽（click+drag，内容跟随手指，位移超过
+  `DRAG_TAP_SLOP` 时取消本次 tap 的点击）。命中测试无需改动——子节点屏幕坐标已含偏移。
+  已知取舍：字形无法逐像素裁剪，纵向按整行裁剪，滚动边界行会整行出现/消失；建议
+  `scrollStep` 设为内容行距。
 - **与文档的偏差**：
-  - 组件对外命名为 `Box / Panel / Text / Button`（§10 大写命名），编译器同时接受小写别名。
+  - 组件对外命名为 `Box / Panel / Text / Button / Scroll`（§10 大写命名），编译器同时接受小写别名。
   - 编译入口为顶层 `render(<App/>)`（挂载根组件；产物是模块，运行时由 `start(side)` 启动）。
     多文件 import 已支持（见下「多文件 import」）。
   - 三元表达式降级为 Lua `and/or`，要求真值分支为真值（元素/数字/字符串），文档化限制。
-  - 无滚动/裁剪；内容溢出视口不绘制也不可点击。
 - **多文件 import（2025-08）**：应用可按正常 React 习惯拆成多个 `.tsx` / `.ts` 文件并用
   `import` / `export` 组织。编译管线改为 `esbuild.build({ bundle: true, jsx: 'preserve' })`
   把整个应用打包成单个 chunk 再交给 codegen（§5 起步路径的升级）：Lua 产物仍是**单个模块**
