@@ -14,6 +14,7 @@
 - 参考文档：
   - CC 电脑（CC: Tweaked）：https://tweaked.cc/
   - Tom's Peripherals：https://github.com/tom5454/Toms-Peripherals/wiki/
+  - **GPU API 真机验证版参考**：`docs/toms-gpu-api.md`（坐标/颜色/字体/启动顺序/事件格式）
   - 游戏内网络栈（fetch 等）：`docs/lib/`（link / arp / ip / icmp / ospf / dns / http / simpleTCP / simplePeripheral）
 
 ## 2. 目标与硬约束

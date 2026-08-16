@@ -3,8 +3,9 @@
 用 React 组件（`.tsx`）为 [CC: Tweaked](https://tweaked.cc/) 电脑编写 UI 的框架：
 `.tsx` 经自研编译器降级为 Lua，显示输出走 [Tom's Peripherals](https://github.com/tom5454/Toms-Peripherals/wiki/) 的 GPU（像素 framebuffer）。
 
-架构设计见 [docs/architecture.md](docs/architecture.md)。**当前状态：MVP 已实现**，满足 §14 两条验收标准：
-静态页面渲染 + 交互/脏矩形重绘闭环。
+架构设计见 [docs/architecture.md](docs/architecture.md)，Tom's Peripherals GPU 的 API 契约（坐标/颜色/
+字体度量/启动顺序等，经 1.3.1 字节码验证）见 [docs/toms-gpu-api.md](docs/toms-gpu-api.md)。
+**当前状态：MVP 已实现**，满足 §14 两条验收标准：静态页面渲染 + 交互/脏矩形重绘闭环。
 
 ## 目录
 
