@@ -24,6 +24,8 @@ function App() {
   const [count, setCount] = useState(0);
   const [history, setHistory] = useState<number[]>([]);
   const [lastChange, setLastChange] = useState('count -> 0');
+  const [name, setName] = useState('');
+  const [greeted, setGreeted] = useState(false);
 
   // Demonstrates useEffect: fires only when `count` changes, then re-renders
   // through a second setState (deps are unchanged on that re-render, so the
@@ -53,7 +55,26 @@ function App() {
         onRecord={() => setHistory([...history, count])}
       />
 
-      <Text style={{ fontSize: 1, color: '#5a5a66', marginTop: 8 }}>{lastChange}</Text>
+      {/* Keyboard input milestone: click to focus, type, Enter submits.
+          Tab/Shift+Tab would cycle focus if there were more inputs. */}
+      <Input
+        value={name}
+        onChange={setName}
+        placeholder="type your name, press enter"
+        style={{ width: '100%', height: 22, marginTop: 6 }}
+        onSubmit={() => {
+          if (name.length > 0) setGreeted(true);
+        }}
+      />
+      <Text style={{ fontSize: 1, color: '#7ec8ff', marginTop: 2 }}>
+        {greeted
+          ? 'hello, ' + name + '!'
+          : name.length > 0
+            ? 'typing: ' + name
+            : 'focus the field, type, press enter'}
+      </Text>
+
+      <Text style={{ fontSize: 1, color: '#5a5a66', marginTop: 4 }}>{lastChange}</Text>
 
       {count >= 5 ? <BigNumberBadge /> : null}
 

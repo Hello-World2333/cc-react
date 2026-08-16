@@ -68,9 +68,34 @@ CC 外设事件第一个 payload 参数是**外设名**（字符串），坐标�
 | `tm_monitor_mouse_click` | `x, y, button` | Bitmap 屏按下（button: 1=左键） |
 | `tm_monitor_mouse_up` | `x, y, button` | Bitmap 屏抬起 |
 | `tm_monitor_mouse_move` / `_drag` / `_scroll` | `x, y` / `x, y` / `x, y, direction` | 指针移动 |
-| `tm_keyboard_key` / `_char` 等 | 外设名后为 key/char 参数 | 键盘（fireNativeEvents=false 时前缀） |
+| `tm_keyboard_key` | `key, isRepeat` | 键盘按下/自动重复（fireNativeEvents=false 时前缀） |
+| `tm_keyboard_key_up` | `key` | 键盘释放（独立事件） |
+| `tm_keyboard_char` | `char` | 可打印字符（含空格） |
+| `tm_keyboard_paste` | `content` | 剪贴板内容（Ctrl+V 由客户端截获，只经此事件到达） |
 
 运行时 `__eventArgs()` 用 `type(e[2]) == "string"` 判断并跳过外设名。
+
+### 键盘键码：GLFW（源码验证）★
+
+Tom's Peripherals 键盘**透传 Minecraft 的 GLFW 键码**（`KeyboardWidget.keyPressed` 的 key 参数
+原样发送），**不是** CC: Tweaked 原生键盘的 PC scancode。常用值：
+
+| 键 | GLFW 码 | 备注 |
+|---|---|---|
+| Enter | 257 | 主键盘回车 |
+| Tab | 258 | |
+| Backspace | 259 | |
+| Insert / Delete | 260 / 261 | |
+| Right / Left / Down / Up | 262 / 263 / 264 / 265 | |
+| Home / End | 268 / 269 | |
+| Left Shift / Right Shift | 340 / 344 | 修饰键按/释放也是 key / key_up 事件，可跟踪 |
+| Ctrl（Left/Right） | 341 / 345 | Ctrl+R/S/T/V 被客户端截获（重启/关机/终止/粘贴） |
+
+另外两个语义要点（与 CC 原生 `key` 事件不同）：
+
+- `tm_keyboard_key` 的第二个参数是 **isRepeat**（按住自动重复），**不是** CC 的 `isUp`；
+  释放单独发 `tm_keyboard_key_up`。
+- `tm_keyboard_char` 只覆盖可打印字符（`' '..'~'` 与 `160..255`），空格会发 char 事件。
 
 ## 7. 显示器连接规则
 

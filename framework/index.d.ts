@@ -34,6 +34,7 @@ declare var Panel: (props: JSX.BoxProps) => JSX.Element;
 declare var Text: (props: JSX.TextProps) => JSX.Element;
 declare var Button: (props: JSX.ButtonProps) => JSX.Element;
 declare var Scroll: (props: JSX.ScrollProps) => JSX.Element;
+declare var Input: (props: JSX.InputProps) => JSX.Element;
 
 declare namespace JSX {
   interface Element {}
@@ -56,10 +57,18 @@ declare namespace JSX {
     /** "#rgb" / "#rrggbb" / "#aarrggbb" — compiled to ARGB numbers. */
     backgroundColor?: string;
     color?: string;
+    /** Background painted behind text glyphs (drawText bg; nil = none). */
+    textBackgroundColor?: string;
     fontSize?: number;
     borderColor?: string;
     /** Pressed background for buttons (needs tm_monitor_mouse_click/up). */
     pressedColor?: string;
+    /** Focus ring border for focused inputs. */
+    focusBorderColor?: string;
+    /** Input text color while the value is empty (placeholder shown). */
+    placeholderColor?: string;
+    /** Input cursor (insertion point) color. */
+    cursorColor?: string;
     /** Scroll only: px per mouse-wheel notch (default 8 = one 5x8 row). */
     scrollStep?: number;
   }
@@ -94,6 +103,28 @@ declare namespace JSX {
     onMouseUp?: () => void;
   }
 
+  /**
+   * Text input (keyboard milestone). The value is CONTROLLED: the app owns
+   * the string and updates it via onChange (React style). Built-in editing:
+   * characters insert at the cursor, Backspace/Delete/arrows/Home/End move
+   * it, Enter fires onSubmit, Tab/Shift+Tab move focus to the next/previous
+   * input. Clicking the input focuses it and places the cursor at the click.
+   *
+   * Key codes in onKey are GLFW codes (Tom's Peripherals keyboard passes
+   * Minecraft's key codes through verbatim): Enter 257, Tab 258, Backspace
+   * 259, Delete 261, Left 263, Right 262, Home 268, End 269, Shift 340/344.
+   */
+  interface InputProps {
+    style?: Style;
+    value?: string;
+    placeholder?: string;
+    onChange?: (value: string) => void;
+    onSubmit?: () => void;
+    /** Raw key hook, called after built-in editing (isUp=false on press /
+     *  repeat, true on release from tm_keyboard_key_up). */
+    onKey?: (key: number, isUp: boolean) => void;
+  }
+
   interface IntrinsicElements {
     box: BoxProps;
     Box: BoxProps;
@@ -105,5 +136,7 @@ declare namespace JSX {
     Button: ButtonProps;
     scroll: ScrollProps;
     Scroll: ScrollProps;
+    input: InputProps;
+    Input: InputProps;
   }
 }

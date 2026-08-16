@@ -6,19 +6,20 @@
 架构设计见 [docs/architecture.md](docs/architecture.md)，Tom's Peripherals GPU 的 API 契约（坐标/颜色/
 字体度量/启动顺序等，经 1.3.1 字节码验证）见 [docs/toms-gpu-api.md](docs/toms-gpu-api.md)。
 **当前状态：MVP 已实现**，满足 §14 两条验收标准：静态页面渲染 + 交互/脏矩形重绘闭环；
-多文件 `import` 已支持（应用可拆多个 `.tsx`/`.ts` 文件，编译期打包进单个 Lua 模块）。
+多文件 `import` 已支持（应用可拆多个 `.tsx`/`.ts` 文件，编译期打包进单个 Lua 模块）；
+里程碑 1「键盘输入 + 焦点管理」已实现（`<Input>` 文本框 + 点击聚焦 / Tab 切换 + 光标闪烁）。
 编译产物为**模块**（`start(side)` 任务函数），由主程序经 simpleParallel 非阻塞调度（为未来网络功能兼容）。
 
 ## 目录
 
 ```
 compiler/          JSX → Lua 编译器（esbuild 打包+擦类型 → @babel/parser AST → codegen）
-runtime/           框架运行时（hooks 状态槽、flexbox 布局、脏矩形渲染、事件路由、GPU 适配）
+runtime/           框架运行时（hooks 状态槽、flexbox 布局、脏矩形渲染、事件路由、焦点模型、GPU 适配）
 framework/         全局 TS 类型声明（useState/useEffect/render 与 JSX 组件类型）
-demo/App.tsx       演示入口（计数器 + 条件徽章 + 动态列表，import 多个组件文件）
+demo/App.tsx       演示入口（计数器 + 条件徽章 + 动态列表 + 键盘输入，import 多个组件文件）
 demo/components/   演示组件（Header / CounterControls / Badge / HistoryList）
 demo/main.lua      演示主程序（require 编译产物，经 simpleParallel 非阻塞调度 UI 任务）
-scripts/           无头测试（stub GPU + CC 环境：验收标准 + 模块/并行契约 + 多文件 import + 滚动用例）
+scripts/           无头测试（stub GPU + CC 环境：验收标准 + 模块/并行契约 + 多文件 import + 滚动 + 键盘输入用例）
 dist/ui.lua        编译产物（模块：require 后由主程序组合调度，拷进电脑即可用）
 ```
 
@@ -63,7 +64,7 @@ simpleParallel.start()
 UI 任务在 `os.pullEvent` 处让出调度器，因此 UI 渲染不阻塞其他任务；CC 会把每个事件
 广播给所有消费者（无争抢），`simpleParallel.start()` 首次会以空事件启动每个任务，
 所以首帧在第一个事件到来前就已渲染。屏幕至少需要 **3 块横向拼接的显示器**
-（192px 宽；示例的完整界面在 3×4 = 192×256 上最佳，基础界面在 3×2 上即可）。
+（192px 宽；示例的完整界面在 3×4 = 192×256 上最佳，基础界面（含输入框）在 3×3 上即可）。
 
 ## 写一个应用
 
@@ -133,14 +134,50 @@ render(<App />);
 （常量/纯函数）、`import { X as Y }` 别名。两个文件导出**同名组件**时打包器会自动改名，
 两者互不干扰。颜色常量可从其他文件导入（`#rgb` / `#rrggbb` / `#aarrggbb` 在运行时解析）。
 
+### 键盘输入（Input + 焦点管理）
+
+`<Input>` 是**受控**组件：文本存在 app 的 `useState` 里，`onChange` 回传每次编辑后的新值；
+内置编辑（光标插入/删除、方向键、粘贴）都走 `onChange`，Enter 触发 `onSubmit`：
+
+```tsx
+function Login() {
+  const [name, setName] = useState('');
+
+  return (
+    <Panel style={{ backgroundColor: '#131318', padding: 10, flexDirection: 'column' }}>
+      <Text style={{ color: '#8a8a95' }}>name:</Text>
+      <Input
+        value={name}
+        onChange={setName}
+        placeholder="type your name"
+        style={{ width: 180, height: 24, marginTop: 4 }}
+        onSubmit={() => print('hello ' + name)}
+      />
+    </Panel>
+  );
+}
+```
+
+点击输入框聚焦（光标定位到点击处，边框变为 `focusBorderColor`，光标闪烁）；
+Tab / Shift+Tab 在输入框之间循环焦点；点击输入框以外的区域失焦。
+`onKey(key, isUp)` 可拿到原始按键（**GLFW 键码**，Tom's 键盘透传 Minecraft 键码：
+Enter 257 / Tab 258 / Backspace 259 / Delete 261 / Left 263 / Right 262 / Home 268 / End 269）。
+
+
 ### 支持范围（MVP）
 
-- 组件：`Box` / `Panel` / `Text` / `Button` / `Scroll`（滚动容器，也接受小写 `scroll` 等）
+- 组件：`Box` / `Panel` / `Text` / `Button` / `Scroll`（滚动容器，也接受小写 `scroll` 等）/
+  `Input`（文本框，里程碑 1）
 - hooks：`useState`（含函数式更新）、`useEffect`（依赖数组比对）
 - 布局：flexbox 子集 —— `flexDirection`（默认 column）、`justifyContent`、`alignItems`（含 stretch）、
   `gap`、`margin` / `padding`（数值或四边对象，支持 `marginTop` 等单边）、固定尺寸 / 内容尺寸 / `width: '100%'`
 - 颜色：`#rgb` / `#rrggbb` / `#aarrggbb`，编译期转 ARGB
 - 事件：`tm_monitor_touch`（普通屏点击）与 `tm_monitor_mouse_click/up`（Bitmap 屏，含按下视觉反馈）
+- 键盘输入 + 焦点管理（里程碑 1）：`<Input>` 文本框 —— 受控 `value` + `onChange`（app 持有文本）、
+  `placeholder` 占位、内置编辑（字符插入/删除、Backspace/Delete、方向键/Home/End、Enter 触发 `onSubmit`、
+  `tm_keyboard_paste` 粘贴）、点击聚焦并把光标定位到点击处、Tab/Shift+Tab 在输入框间循环焦点、
+  点击空白失焦、焦点边框 + 闪烁光标（`os.startTimer` 驱动）；键盘事件走 Tom's Peripherals 的
+  `tm_keyboard_key` / `tm_keyboard_key_up` / `tm_keyboard_char` / `tm_keyboard_paste`
 - 滚动：`<Scroll>` 容器 —— 内容按完整尺寸布局、视口裁剪（不越界绘制），
   滚轮（`tm_monitor_mouse_scroll`，方向语义与真机一致：向下滚动 dir=+1）与触摸拖拽滚动；
   `scrollStep` 控制步长（默认 8px = 一个 5×8 行）；滚动偏移按路径持久化、两端自动钳制
@@ -184,3 +221,9 @@ render(<App />);
   已知取舍：滚动内容越过滚动边界的那一行文字会整行出现/消失（字形无法逐像素裁剪，
   纵向按行裁剪）；`scrollStep` 建议设为内容行距（如行高 + gap），滚动时边界行最平滑。
 - `useState` 状态按「组件实例 DFS 路径」存放；结构静态时稳定，条件渲染换组件会重置对应槽位（keyed list 里程碑解决）。
+- `Input` 的 `value` 是受控的（app 通过 `onChange` 更新）；宽度默认跟随内容
+  （value/placeholder 的测量宽度），值变化会改变盒子大小 —— 需要稳定宽度时显式设置 `width`。
+- 光标闪烁由 `os.startTimer(0.5)` 驱动：输入框聚焦时每 0.5s 产生一次极小脏矩形重绘；
+  按键/点击会重置闪烁并重新计时。对性能敏感的场景可在 `onChange` 中自行管理。
+- 键盘事件只走 Tom's Peripherals 前缀形态（`tm_keyboard_*`，`fireNativeEvents` 默认 false）；
+  原生 `key`/`char` 事件形态未接入。

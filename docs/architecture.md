@@ -120,9 +120,13 @@ tm_monitor_touch / tm_monitor_mouse_click / tm_keyboard_* 事件
 - **触摸/鼠标**（GPU 屏幕）：
   - 普通屏幕：`tm_monitor_touch`（参数 x, y, sneaking）
   - Bitmap 屏幕：`tm_monitor_mouse_click`（x, y 为像素坐标，button 为按键 id）
-- **键盘**（Tom's Peripherals Keyboard）：`tm_keyboard_key` / `tm_keyboard_char` 等；`fireNativeEvents` 为 false 时事件以 `tm_keyboard_` 为前缀。
+- **键盘**（Tom's Peripherals Keyboard）：`tm_keyboard_key`（**GLFW 键码** + `isRepeat`，按下与
+  自动重复都会触发）/ `tm_keyboard_key_up`（释放）/ `tm_keyboard_char`（可打印字符，含空格）/
+  `tm_keyboard_paste`（剪贴板）；`fireNativeEvents` 为 false 时事件以 `tm_keyboard_` 为前缀。
 - 命中测试：事件坐标 → 布局树 → 最深命中元素 → 触发组件事件处理器（onClick / onMouseDown / onKey 等）。
-- 焦点管理：键盘输入组件（Input）需要焦点模型（点击聚焦 / Tab 切换），MVP 范围内。
+- 焦点管理：键盘输入组件（Input）需要焦点模型（点击聚焦 / Tab 切换）—— **已实现（里程碑 1）**：
+  Input 是唯一可聚焦节点；点击聚焦并把光标定位到点击处、Tab/Shift+Tab 按树序循环焦点、
+  点击空白失焦、焦点边框 + `os.startTimer` 驱动的闪烁光标（见附录「键盘输入与焦点管理」）。
 
 ## 10. 基础组件与首版范围
 
@@ -162,7 +166,7 @@ MVP 框架包含：
 
 MVP 之外的后续里程碑（按优先级建议）：
 
-1. 键盘输入 + 焦点管理
+1. ~~键盘输入 + 焦点管理~~ **已实现（2025-08）**，见附录「键盘输入与焦点管理」
 2. 动态列表（keyed diff）
 3. 网络接入（async 状态机编译；任务侧已就绪 —— 模块的 `start(side)` 可直接与网络栈任务并行）
 4. 动画（声明式 transition）
@@ -205,7 +209,35 @@ MVP 已按本文档落地，代码布局见仓库根目录 README。与本文档
   `justifyContent`（start/center/end/space-between/space-around）、`alignItems`（含 stretch）、
   `gap`、`margin`/`padding`（数值、四边对象、单边 `marginTop` 等）、固定尺寸/内容尺寸/`width: "100%"`。
 - **事件模型**（§9）：`tm_monitor_touch` 与 `tm_monitor_mouse_click/up`（Bitmap 屏带按下视觉）命中测试
-  已实现；键盘事件仅预留分支，Input/焦点管理未做（属于 §14 里程碑 1）。
+  已实现；键盘输入 + 焦点管理已实现（见下「键盘输入与焦点管理」）。
+- **键盘输入与焦点管理（2025-08，里程碑 1）**：新增 `<Input>` 宿主组件（`__input` 节点）与焦点模型。
+  - **焦点模型**：`__focusedPath`（当前焦点节点路径）+ `__focusList`（当前树中的可聚焦节点，每次
+    `__render` 经 `__assignPaths` 重建，按树序）。可聚焦 = Input（MVP 范围，扩展点 `__isFocusable`）。
+    点击 Input 聚焦并把光标定位到点击处（逐字符测量定位）；点击非 Input 区域失焦；Tab 258 /
+    Shift+Tab（`__modsDown` 跟踪 340/344 的按下/释放）按树序循环焦点；焦点节点被条件渲染移除时
+    （`__focusSeen` 标记）自动清理焦点状态。
+  - **Input 语义**：受控组件 —— `value` 由 app 持有，所有内置编辑（字符插入、Backspace/Delete、
+    Home/End/方向键、`tm_keyboard_paste` 粘贴）算出新串后经 `onChange` 回传；Enter 触发 `onSubmit`；
+    可选 `onKey(key, isUp)` 原始按键钩子（内置编辑之后调用）。光标位置存于 `__inputState[path]`
+    （按节点路径持久化，编辑时钳制到 value 长度）。绘制：value（空时 placeholder + placeholderColor）、
+    焦点边框（`focusBorderColor`）、2px 插入条光标（`cursorColor`，`os.startTimer(0.5)` 驱动闪烁，
+    `timer` 事件切换 `cursorVisible` 后走脏矩形重绘；每次编辑重置闪烁）。测量：宽度 = value 或
+    placeholder 的文本宽度（都空时一个字符格），显式 `width` 优先。
+  - **键盘事件契约（真机源码验证）**：Tom's Peripherals 键盘**透传 Minecraft 的 GLFW 键码**
+    （不是 CC 的 PC scancode）：Enter 257 / Tab 258 / Backspace 259 / Delete 261 / Left 263 /
+    Right 262 / Home 268 / End 269 / Shift 340/344。事件形态（fireNativeEvents=false）：
+    `tm_keyboard_key`（peripheral, key, **isRepeat** —— 与 CC 原生 key 事件的 isUp 语义不同，
+    按下和自动重复都发）、`tm_keyboard_key_up`（peripheral, key，释放单独发）、
+    `tm_keyboard_char`（peripheral, char，可打印字符含空格）、`tm_keyboard_paste`（peripheral, content）。
+    运行时按 key-down（含 repeat，自动重复删字/移光标）处理编辑、`char`/`paste` 插入文本；
+    修饰键状态从 key/key_up 事件维护。
+  - **脏矩形**：`__sameNode` 新增 value/placeholder/focused/cursor/cursorVisible 比较 ——
+    焦点边框、光标移动、闪烁都产生极小脏矩形增量重绘。
+  - **验证**：`scripts/fixtures/input/`（双输入框 + 占位 + onKey 计数器）与 `scripts/test_input.lua`
+    （点击聚焦/光标定位、逐键编辑、Tab/Shift+Tab、失焦、Enter 提交、粘贴、闪烁 timer tick、
+    自动重复、像素级焦点边框/占位/光标断言）。
+  - **附带修复**：JSX 注释 `{/* ... */}`（babel 解析为空的 JSXExpressionContainer）不再报错 ——
+    codegen 的 children 收集跳过 `JSXEmptyExpression`。
 - **显示环境**（§12）：`gpu.setSize(64)`、视口取 `gpu.getSize()`。**坐标约定**：帧缓冲内部与事件一致为
   1-based；已从 1.3.1 字节码确认 draw 系列也是 1-based（`filledRectangle`/`drawText` 内部执行 `x-1`，
   `x<1` 或文字越界时抛 "Out of boundary"），适配层不做偏移，并对越界绘制做跳过/裁剪。

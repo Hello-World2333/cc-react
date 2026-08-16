@@ -23,6 +23,7 @@ const HOST_FACTORIES = new Map([
   ['text', '__text'], ['Text', '__text'],
   ['button', '__button'], ['Button', '__button'],
   ['scroll', '__scroll'], ['Scroll', '__scroll'],
+  ['input', '__input'], ['Input', '__input'],
 ]);
 
 export class CodegenError extends Error {}
@@ -633,7 +634,7 @@ export class Codegen {
     }
     if (/^[a-z]/.test(tag)) {
       throw new CodegenError(
-        `unknown intrinsic element <${tag}/> (known: Box/Panel/Text/Button)`);
+        `unknown intrinsic element <${tag}/> (known: Box/Panel/Text/Button/Scroll/Input)`);
     }
     if (!this.components.has(tag)) {
       throw new CodegenError(`<${tag}/> is used but no component function '${tag}' is defined`);
@@ -668,17 +669,20 @@ export class Codegen {
       parts.push(`${ident(name)} = ${value}`);
     }
 
-    const children = node.children.filter((c) => !(c.type === 'JSXText' && c.value.trim() === ''));
+    const children = node.children
+      .filter((c) => !(c.type === 'JSXText' && c.value.trim() === ''))
+      .filter((c) => !(c.type === 'JSXExpressionContainer' && c.expression.type === 'JSXEmptyExpression'));
     const tag = node.openingElement.name.name;
     const kind = HOST_FACTORIES.get(tag) ? tag.toLowerCase() : null;
     if (children.length > 0) {
-      if (kind === 'text' || kind === 'button') {
+      if (kind === 'text' || kind === 'button' || kind === 'input') {
         for (const c of children) {
           if (c.type === 'JSXExpressionContainer' && exprMayBeElement(c.expression)) {
             throw new CodegenError(`<${tag}> children must be text (elements are not allowed inside text)`);
           }
         }
-        parts.push(`${kind === 'button' ? 'label' : 'text'} = ${this.genTextConcat(children)}`);
+        const prop = kind === 'button' ? 'label' : kind === 'input' ? 'value' : 'text';
+        parts.push(`${prop} = ${this.genTextConcat(children)}`);
       } else {
         parts.push(`children = __children({ ${this.jsxChildren(children)} })`);
       }
@@ -689,6 +693,7 @@ export class Codegen {
   jsxChildren(children) {
     return children
       .filter((c) => !(c.type === 'JSXText' && c.value.trim() === ''))
+      .filter((c) => !(c.type === 'JSXExpressionContainer' && c.expression.type === 'JSXEmptyExpression'))
       .map((c) => {
         if (c.type === 'JSXText') return luaString(jsxTextValue(c));
         if (c.type === 'JSXExpressionContainer') return this.genExpr(c.expression);

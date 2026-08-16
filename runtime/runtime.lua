@@ -281,6 +281,11 @@ local function __makeNode(kind, props, defaults)
     style = style,
     text = props.text,
     label = props.label,
+    value = props.value,
+    placeholder = props.placeholder,
+    onChange = props.onChange,
+    onSubmit = props.onSubmit,
+    onKey = props.onKey,
     onClick = props.onClick,
     onMouseDown = props.onMouseDown,
     onMouseUp = props.onMouseUp,
@@ -288,6 +293,9 @@ local function __makeNode(kind, props, defaults)
     parent = nil,
     path = nil,
     pressed = false,
+    focused = false,
+    cursor = 0,
+    cursorVisible = false,
     x = 0, y = 0, w = 0, h = 0,
     -- scroll viewport: content size + current offset (set during layout)
     scrollX = 0, scrollY = 0, contentW = 0, contentH = 0,
@@ -314,6 +322,27 @@ local function __button(props)
     pressedColor = 0xFF3A3A48,
     color = COLOR_TEXT,
     padding = 6,
+    fontSize = 1,
+  })
+end
+
+-- Text input (keyboard milestone): a focusable leaf that draws its value (or
+-- the placeholder while empty) plus a blinking cursor when focused. Editing
+-- is built in — characters insert at the cursor, backspace/delete/arrows/
+-- home/end move it, enter fires onSubmit — and every edit reports the new
+-- value via onChange (the app owns the value, React controlled style).
+-- Tab / Shift+Tab move focus between inputs; clicking an input focuses it
+-- and places the cursor at the clicked character. The focus ring uses
+-- focusBorderColor while the node has focus.
+local function __input(props)
+  return __makeNode("input", props, {
+    backgroundColor = 0xFF17171E,
+    borderColor = 0xFF4A4A5A,
+    focusBorderColor = 0xFF7EC8FF,
+    color = COLOR_TEXT,
+    placeholderColor = 0xFF6A6A78,
+    cursorColor = 0xFF7EC8FF,
+    padding = 4,
     fontSize = 1,
   })
 end
@@ -402,6 +431,19 @@ local __rootFn = nil
 local __lastTree = nil
 local __scrollState = {}  -- __scrollState[path] = { x, y, maxX, maxY } (scroll viewport offsets)
 
+-- Focus model (keyboard milestone): __focusedPath is the path of the node
+-- that owns keyboard input; __focusList is the ordered set of focusable
+-- nodes in the CURRENT tree (rebuilt every render — Tab cycles it in tree
+-- order); __inputState holds per-input editing state (cursor index + blink
+-- timer); __modsDown tracks held modifier keys (Tom's keyboard sends key
+-- down/release as separate events, so Shift+Tab is detectable).
+local __focusedPath = nil
+local __focusList = {}
+local __inputState = {}   -- __inputState[path] = { cursor = n, blink = bool, timer = id }
+local __modsDown = {}     -- __modsDown[key] = true while a key is held
+local __focusSeen = false -- the focused path is present in the current tree
+local BLINK_INTERVAL = 0.5
+
 local function __scheduleRender()
   __renderQueued = true
 end
@@ -469,6 +511,204 @@ local function __component(fnId, fn, props)
 end
 
 -- ============================================================
+-- 3b. Focus model & keyboard editing (Input)
+-- ============================================================
+
+-- Tom's Peripherals keyboard emits GLFW key codes (not CC's PC scancodes;
+-- verified in the mod's KeyboardWidget: the keyPressed() key parameter is
+-- passed through verbatim) with tm_keyboard_key(peripheral, key, isRepeat)
+-- on press/repeat and tm_keyboard_key_up(peripheral, key) on release.
+local KEY_ENTER = 257
+local KEY_TAB = 258
+local KEY_BACKSPACE = 259
+local KEY_DELETE = 261
+local KEY_RIGHT = 262
+local KEY_LEFT = 263
+local KEY_HOME = 268
+local KEY_END = 269
+local KEY_LSHIFT = 340
+local KEY_RSHIFT = 344
+
+-- Focusable nodes: only Input in the MVP (extend with Buttons later).
+local function __isFocusable(node)
+  return node.kind == "input"
+end
+
+local function __inputStateFor(path)
+  local st = __inputState[path]
+  if st == nil then
+    st = { cursor = 0, blink = true, timer = nil }
+    __inputState[path] = st
+  end
+  return st
+end
+
+-- The node that currently owns keyboard input, looked up by path in the last
+-- rendered tree (paths are stable while the tree structure is static).
+local function __focusedNode()
+  if __focusedPath == nil then return nil end
+  local function find(n)
+    if n.path == __focusedPath then return n end
+    for i = 1, #n.children do
+      local r = find(n.children[i])
+      if r then return r end
+    end
+    return nil
+  end
+  return find(__lastTree)
+end
+
+local function __cancelBlink(path)
+  local st = __inputState[path]
+  if st and st.timer then
+    if os.cancelTimer then pcall(os.cancelTimer, st.timer) end
+    st.timer = nil
+  end
+end
+
+-- Restart the cursor blink cycle (blink ON + a fresh timer). Called whenever
+-- the focused input or its editing state changes; schedules a repaint so the
+-- cursor appears instantly.
+local function __restartBlink(path)
+  local st = __inputStateFor(path)
+  st.blink = true
+  __cancelBlink(path)
+  if os.startTimer then
+    local ok, id = pcall(os.startTimer, BLINK_INTERVAL)
+    if ok and id then st.timer = id end
+  end
+  __scheduleRender()
+end
+
+-- Drop focus (blur). No-op when nothing is focused.
+local function __blur()
+  if __focusedPath == nil then return end
+  __cancelBlink(__focusedPath)
+  __focusedPath = nil
+  __scheduleRender()
+end
+
+local function __focusNode(node)
+  if node == nil or node.path == __focusedPath then return end
+  if __focusedPath then __cancelBlink(__focusedPath) end
+  __focusedPath = node.path
+  __restartBlink(node.path)
+end
+
+-- Move focus to the next/prev focusable node in tree order (Tab / Shift+Tab);
+-- wraps around. With no current focus, direction picks the first/last.
+local function __focusNext(dir)
+  local n = #__focusList
+  if n == 0 then return end
+  local idx = nil
+  for i = 1, n do
+    if __focusList[i].path == __focusedPath then idx = i break end
+  end
+  if idx == nil then idx = dir > 0 and 0 or (n + 1) end
+  idx = idx + dir
+  if idx < 1 then idx = n elseif idx > n then idx = 1 end
+  __focusNode(__focusList[idx])
+end
+
+-- Focus an input from a pointer press, placing the cursor at the character
+-- the press landed on (nearest char boundary of the value text).
+local function __focusInputAt(node, x)
+  local path = node.path
+  if __focusedPath ~= path then
+    if __focusedPath then __cancelBlink(__focusedPath) end
+    __focusedPath = path
+  end
+  local st = __inputStateFor(path)
+  local val = node.value or ""
+  local fs = node.style.fontSize or 1
+  local tp = node.style.textPadding or 1
+  local base = node.x + node.style.paddingL
+  local cur = #val
+  for i = 1, #val do
+    local cw = __gpu.getTextLength(val:sub(i, i), fs, tp)
+    if x < base + cw / 2 then cur = i - 1 break end
+    base = base + cw
+  end
+  st.cursor = cur
+  __restartBlink(path)
+end
+
+-- Insert text (a typed char or pasted content) at the cursor; reports the
+-- new full value via onChange.
+local function __inputInsert(node, str)
+  local val = node.value or ""
+  local st = __inputStateFor(node.path)
+  local cur = st.cursor
+  if cur < 0 then cur = 0 elseif cur > #val then cur = #val end
+  local nv = val:sub(1, cur) .. str .. val:sub(cur + 1)
+  st.cursor = cur + #str
+  if node.onChange then node.onChange(nv) end
+  __restartBlink(node.path)
+end
+
+local function __inputBackspace(node)
+  local val = node.value or ""
+  local st = __inputStateFor(node.path)
+  local cur = st.cursor
+  if cur > 0 then
+    local nv = val:sub(1, cur - 1) .. val:sub(cur + 1)
+    st.cursor = cur - 1
+    if node.onChange then node.onChange(nv) end
+  end
+  __restartBlink(node.path)
+end
+
+local function __inputDelete(node)
+  local val = node.value or ""
+  local st = __inputStateFor(node.path)
+  local cur = st.cursor
+  if cur < #val then
+    local nv = val:sub(1, cur) .. val:sub(cur + 2)
+    if node.onChange then node.onChange(nv) end
+  end
+  __restartBlink(node.path)
+end
+
+-- move = -1 / +1 steps, or "start" / "end"; clamps to the value length.
+local function __inputMoveCursor(node, delta, mode)
+  local val = node.value or ""
+  local st = __inputStateFor(node.path)
+  local cur = st.cursor
+  if mode == "start" then cur = 0
+  elseif mode == "end" then cur = #val
+  else cur = cur + delta end
+  if cur < 0 then cur = 0 elseif cur > #val then cur = #val end
+  if cur ~= st.cursor then
+    st.cursor = cur
+    __restartBlink(node.path)
+  end
+end
+
+-- Built-in key-down handling for the focused input. Repeats (isRepeat=true)
+-- are handled too, so holding Backspace/arrows auto-repeats like a terminal.
+local function __handleKeyDown(node, key)
+  if key == KEY_BACKSPACE then
+    __inputBackspace(node)
+  elseif key == KEY_DELETE then
+    __inputDelete(node)
+  elseif key == KEY_LEFT then
+    __inputMoveCursor(node, -1)
+  elseif key == KEY_RIGHT then
+    __inputMoveCursor(node, 1)
+  elseif key == KEY_HOME then
+    __inputMoveCursor(node, 0, "start")
+  elseif key == KEY_END then
+    __inputMoveCursor(node, 0, "end")
+  elseif key == KEY_ENTER then
+    if node.onSubmit then node.onSubmit() end
+    __restartBlink(node.path)
+  elseif key == KEY_TAB then
+    local shift = __modsDown[KEY_LSHIFT] or __modsDown[KEY_RSHIFT]
+    __focusNext(shift and -1 or 1)
+  end
+end
+
+-- ============================================================
 -- 4. Flexbox layout (measure + place)
 -- ============================================================
 
@@ -485,10 +725,17 @@ local function __measure(node, maxW, maxH)
   local s = node.style
   local cw, ch
   local kind = node.kind
-  if kind == "text" or kind == "button" then
+  if kind == "text" or kind == "button" or kind == "input" then
     local fs = s.fontSize or 1
     local tp = s.textPadding or 1 -- mod default: 1px spacing between chars
-    local str = kind == "text" and (node.text or "") or (node.label or "")
+    local str
+    if kind == "input" then
+      str = node.value or ""
+      if #str == 0 then str = node.placeholder or "" end
+      if #str == 0 then str = " " end -- keep an empty input a char cell wide
+    else
+      str = kind == "text" and (node.text or "") or (node.label or "")
+    end
     cw = __gpu.getTextLength(str, fs, tp)
     ch = FONT_H * fs
   elseif kind == "scroll" then
@@ -714,6 +961,18 @@ local function __assignPaths(node, path, parent)
   node.path = path
   node.parent = parent
   node.pressed = node.path == __pressedPath
+  node.focused = node.path == __focusedPath
+  if node.focused then __focusSeen = true end
+  -- cursor position for the focused input (clamped to the current value);
+  -- cursorVisible drives the blink repaint
+  local inState = __inputState[path]
+  local cur = inState and inState.cursor or 0
+  local vlen = node.value and #node.value or 0
+  if cur < 0 then cur = 0 elseif cur > vlen then cur = vlen end
+  if inState and inState.cursor ~= cur then inState.cursor = cur end
+  node.cursor = cur
+  node.cursorVisible = node.focused and inState ~= nil and inState.blink
+  if __isFocusable(node) then table.insert(__focusList, node) end
   if node.kind == "scroll" then
     local st = __scrollState[path]
     if st == nil then st = { x = 0, y = 0, maxX = 0, maxY = 0 } __scrollState[path] = st end
@@ -743,7 +1002,12 @@ local function __sameNode(a, b)
   if not __sameStyle(a.style, b.style) then return false end
   if a.text ~= b.text then return false end
   if a.label ~= b.label then return false end
+  if a.value ~= b.value then return false end
+  if a.placeholder ~= b.placeholder then return false end
   if a.pressed ~= b.pressed then return false end
+  if a.focused ~= b.focused then return false end
+  if a.cursor ~= b.cursor then return false end
+  if a.cursorVisible ~= b.cursorVisible then return false end
   if a.x ~= b.x or a.y ~= b.y or a.w ~= b.w or a.h ~= b.h then return false end
   return true
 end
@@ -849,7 +1113,11 @@ local function __drawNode(node, clip)
   end
   if fill then __gpu.filledRectangle(node.x, node.y, w, h, fill, clip) end
   if s.borderColor then
-    __gpu.rectangle(node.x, node.y, w, h, s.borderColor, clip)
+    local bc = s.borderColor
+    if node.kind == "input" and node.focused and s.focusBorderColor then
+      bc = s.focusBorderColor -- focus ring
+    end
+    __gpu.rectangle(node.x, node.y, w, h, bc, clip)
   end
   if node.kind == "text" then
     if node.text and #node.text > 0 then
@@ -866,6 +1134,24 @@ local function __drawNode(node, clip)
     local tx = math.floor(node.x + (w - tw) / 2 + 0.5)
     local ty = math.floor(node.y + (h - th) / 2 + 0.5)
     __gpu.drawText(tx, ty, label, s.color or COLOR_TEXT, fill, fs, tp, clip)
+  elseif node.kind == "input" then
+    local fs = s.fontSize or 1
+    local tp = s.textPadding or 1
+    local val = node.value or ""
+    local show, color = val, s.color or COLOR_TEXT
+    if #show == 0 then
+      show = node.placeholder or ""
+      color = s.placeholderColor or (s.color or COLOR_TEXT)
+    end
+    if #show > 0 then
+      __gpu.drawText(node.x + s.paddingL, node.y + s.paddingT, show, color, s.textBackgroundColor, fs, tp, clip)
+    end
+    -- blinking insertion-point cursor (2px bar, full glyph height)
+    if node.focused and node.cursorVisible then
+      local cw = __gpu.getTextLength(val:sub(1, node.cursor), fs, tp)
+      local cx = node.x + s.paddingL + cw
+      __gpu.filledRectangle(cx, node.y + s.paddingT, 2, FONT_H * fs, s.cursorColor or COLOR_TEXT, clip)
+    end
   end
   local children = node.children
   if node.kind == "scroll" then
@@ -922,12 +1208,20 @@ local function __render()
   __pendingEffects = {}
   __instanceCount = 0
   __pathStack = {}
+  __focusList = {}
+  __focusSeen = false
   local ok, tree = pcall(__component, "__root", __rootFn, {})
   if not ok then error("cc-react: render failed: " .. tostring(tree), 0) end
   if type(tree) ~= "table" then
     error("cc-react: the root component must return an element, got " .. tostring(tree), 0)
   end
   __assignPaths(tree, "1", nil)
+  -- if the focused node vanished (conditional render removed it), drop the
+  -- focus state — don't schedule, we are mid-render already
+  if __focusedPath and not __focusSeen then
+    __cancelBlink(__focusedPath)
+    __focusedPath = nil
+  end
   __layout(tree, 1, 1, __viewportW, __viewportH)
 
   local rects = {}
@@ -1024,16 +1318,29 @@ local function __handleEvent(e)
     local i = __eventArgs(e)
     local x, y = e[i], e[i + 1]
     if type(x) == "number" and type(y) == "number" then
-      local h = __findHandler(__hitTest(x, y), "onClick")
+      local hit = __hitTest(x, y)
+      -- focus management: tapping an input focuses it (cursor at the tap
+      -- position), any other tap blurs
+      if hit and __isFocusable(hit) then
+        __focusInputAt(hit, x)
+      else
+        __blur()
+      end
+      local h = __findHandler(hit, "onClick")
       if h and h.onClick then
-          h.onClick()
-    end
+        h.onClick()
+      end
     end
   elseif name == "tm_monitor_mouse_click" then
     local i = __eventArgs(e)
     local x, y, btn = e[i], e[i + 1], e[i + 2]
     if type(x) == "number" and type(y) == "number" and (btn == nil or btn == 1) then
       local hit = __hitTest(x, y)
+      if hit and __isFocusable(hit) then
+        __focusInputAt(hit, x)
+      else
+        __blur()
+      end
       local h = __findHandler(hit, "onClick")
       if h then
         __pressedPath = h.path
@@ -1097,8 +1404,57 @@ local function __handleEvent(e)
         __scrollBy(sc, 0, dir * step)
       end
     end
+  elseif name == "tm_keyboard_key" then
+    -- (peripheral, key, isRepeat): fires on press AND on auto-repeat
+    local i = __eventArgs(e)
+    local key, isRepeat = e[i], e[i + 1]
+    if type(key) == "number" then
+      __modsDown[key] = true
+      local node = __focusedNode()
+      if node then
+        __handleKeyDown(node, key)
+        if node.onKey then node.onKey(key, false) end
+      end
+    end
+  elseif name == "tm_keyboard_key_up" then
+    -- (peripheral, key): fires once on release
+    local i = __eventArgs(e)
+    local key = e[i]
+    if type(key) == "number" then
+      __modsDown[key] = nil
+      local node = __focusedNode()
+      if node and node.onKey then node.onKey(key, true) end
+    end
+  elseif name == "tm_keyboard_char" then
+    -- (peripheral, char): printable characters only (space included)
+    local i = __eventArgs(e)
+    local ch = e[i]
+    if type(ch) == "string" and #ch > 0 then
+      local node = __focusedNode()
+      if node then __inputInsert(node, ch) end
+    end
+  elseif name == "tm_keyboard_paste" then
+    -- (peripheral, content): the player's clipboard (Ctrl+V is intercepted
+    -- client-side, so this is the only way pasted text reaches the program)
+    local i = __eventArgs(e)
+    local content = e[i]
+    if type(content) == "string" and #content > 0 then
+      local node = __focusedNode()
+      if node then __inputInsert(node, content) end
+    end
+  elseif name == "timer" then
+    -- cursor blink tick for the focused input
+    local id = e[2]
+    local st = __focusedPath and __inputState[__focusedPath]
+    if st and st.timer == id then
+      st.blink = not st.blink
+      __scheduleRender()
+      if os.startTimer then
+        local ok, id2 = pcall(os.startTimer, BLINK_INTERVAL)
+        if ok and id2 then st.timer = id2 end
+      end
+    end
   end
-  -- keyboard (tm_keyboard_*) is a follow-up milestone (Input + focus)
 end
 
 local function __drain()
@@ -1156,4 +1512,6 @@ ccreact = {
   getViewport = function() return __viewportW, __viewportH end,
   isPressed = function() return __pressedPath end,
   hitTest = function(x, y) return __hitTest(x, y) end,
+  getFocused = function() return __focusedPath end,
+  getInputState = function(path) return __inputState[path] end,
 }

@@ -29,7 +29,10 @@
   test file.
 ]]
 
-local VW, VH = 256, 192   -- real device: 4x3 monitor at resolution 64 → 256x192 px
+-- 4x4 monitors at resolution 64 → 256x256 px. Taller than the original
+-- 256x192 so the demo's full UI (header + controls + input + history) fits
+-- on screen — the README recommends a 3x4 (192x256) layout for the demo.
+local VW, VH = 256, 256
 local FONT_W, FONT_H = 5, 8   -- default font is 5x8 (ascii.bin header)
 
 -- CC: Tweaked exposes table.unpack (Lua 5.2 compat); plain Lua 5.1 only has
@@ -200,6 +203,10 @@ end
 _G.os = {
   pullEvent = osPullEvent,
   shutdown = function() end,
+  -- the cursor blink uses os.startTimer/cancelTimer; a single fixed id is
+  -- enough for the step-script (tests feed {"timer", 1} to tick the blink)
+  startTimer = function() return 1 end,
+  cancelTimer = function() end,
 }
 -- CC global; the runtime no longer sleeps at startup (refreshSize is
 -- blocking), but keep a stub in case any future code path calls it.
