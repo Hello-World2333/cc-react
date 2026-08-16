@@ -217,12 +217,20 @@ _G.peripheral = {
   end,
 }
 
--- Minimal fs stub for the Chinese font path: CC's fs.open(path, "rb") returns
--- a handle with read(n)/seek("set", pos)/close() — Lua io handles expose the
--- exact same API, so we pass them straight through.
+-- Minimal fs stub for the Chinese font path. CC's fs file handles expose
+-- BOUND methods — file.read(count), file.seek(whence, offset), file.close()
+-- take NO self (verified on a real device; a colon call passes the handle
+-- itself as the first argument). The stub wraps io handles so the runtime
+-- can use the same dot-call convention everywhere.
 _G.fs = {
   open = function(path, mode)
-    return io.open(path, mode or "r")
+    local f = io.open(path, mode or "r")
+    if not f then return nil end
+    return {
+      read = function(n) return f:read(n) end,
+      seek = function(whence, offset) return f:seek(whence, offset) end,
+      close = function() return f:close() end,
+    }
   end,
 }
 

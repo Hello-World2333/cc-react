@@ -244,9 +244,9 @@ local function __fontOpen(name)
   if not fs or not fs.open then return false end
   __fontFile = fs.open(name, "rb")
   if not __fontFile then return false end
-  local hdr = __fontFile:read(12)
+  local hdr = __fontFile.read(12)
   if not hdr or #hdr < 12 or hdr:sub(1, 4) ~= "CCF1" then
-    __fontFile:close()
+    __fontFile.close()
     __fontFile = nil
     return false
   end
@@ -256,8 +256,8 @@ end
 
 -- Read entry idx (0-based); returns cp, width, rows
 local function __fontReadEntry(idx)
-  __fontFile:seek("set", 12 + idx * FONT_ENTRY)
-  local e = __fontFile:read(FONT_ENTRY)
+  __fontFile.seek("set", 12 + idx * FONT_ENTRY)
+  local e = __fontFile.read(FONT_ENTRY)
   if not e or #e < FONT_ENTRY then return nil end
   local cp = __be32(e, 1)
   local w = e:byte(5)
