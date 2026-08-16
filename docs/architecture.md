@@ -162,6 +162,10 @@ MVP 框架包含：
 
 - 编译产物由开发者自行 SFTP 部署到游戏环境（如 MC 存档 `computer/<id>/` 目录）。
 - 工具链不负责部署；不排除未来做自动同步/热重启。
+- **CLI（2025-08）**：编译器封装为 `cc-react` CLI（`compiler/cli.mjs`，npm 包
+  `@linyun-host/cc-react`，含 `-o/--out`、`-w/--watch`、`--help/--version`），
+  共享管线在 `compiler/compile.mjs`（`compile()` 程序化 API 同源）；`compiler/index.mjs`
+  保留为仓库脚本接口（`node compiler/index.mjs <entry> <out>`）。用法见根 README「CLI」。
 
 ## 14. MVP 验收标准
 

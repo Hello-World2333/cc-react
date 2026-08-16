@@ -16,7 +16,7 @@ HTTP 客户端，后台任务执行）+ `useRequest`（loading/data/error 三态
 ## 目录
 
 ```
-compiler/          JSX → Lua 编译器（esbuild 打包+擦类型 → @babel/parser AST → codegen）
+compiler/          JSX → Lua 编译器（cli.mjs = cc-react CLI；compile.mjs = 共享管线；index.mjs = 脚本入口）
 runtime/           框架运行时（hooks 状态槽、flexbox 布局、脏矩形渲染、事件路由、焦点模型、GPU 适配）
 framework/         全局 TS 类型声明（useState/useEffect/render 与 JSX 组件类型）
 demo/App.tsx       演示入口（6 标签页 showcase：静态渲染 / flexbox / 交互 / 键盘 / 滚动 / 网络）
@@ -35,6 +35,53 @@ npm run build      # demo/App.tsx -> dist/ui.lua（模块形态）
 npm run test       # luac 语法检查 + 无头测试（stub GPU + 并行调度）
 npm run test:all   # typecheck + build + test
 ```
+
+## CLI（npm 包）
+
+编译器已封装为 `cc-react` CLI，并已准备好发布到 npm（`@linyun-host/cc-react`，
+**尚未实际发布**）。安装后在自己的项目里编译应用：
+
+```bash
+npm i -D @linyun-host/cc-react
+
+cc-react src/App.tsx dist/ui.lua        # 编译为单个 Lua 模块
+cc-react src/App.tsx --watch            # 监听源文件（含所有 import）变化，自动重编译
+cc-react --help                         # 参数说明
+```
+
+```
+用法: cc-react <entry.tsx> [out.lua] [options]
+
+参数:
+  entry                 入口 .tsx 文件（跨 .tsx/.ts 的 import 在编译期打包）
+  out                   输出 Lua 模块（默认 dist/ui.lua）
+
+选项:
+  -o, --out <file>      指定输出文件（与位置参数 <out> 等价）
+  -w, --watch           源文件变化时自动重编译
+  -h, --help            显示帮助
+  -v, --version         打印版本
+```
+
+退出码：`0` 成功；`1` 编译失败（bundling / codegen / 参数错误）。
+
+已知限制：编译管线把**入口**强制按 ESM 处理（`export {}` 注入，esbuild 会在产物中剥掉），
+因此单文件应用在 `"type": "commonjs"` 项目里也能编译；被 import 的文件只要含
+`export`（正常拆分方式）即按 ESM 处理。仅做副作用 import（`import './x'`）且 x 无任何
+导出的文件，在 CommonJS 项目中会被 esbuild 包成 CJS 包装（含逗号表达式，codegen 不支持）——
+让被 import 的文件至少有一个 `export` 即可。
+
+发布内容（`files` 字段）：`compiler/`（CLI + 编译管线）、`runtime/runtime.lua`、
+`framework/index.d.ts`；demo / scripts / docs 不随包发布。程序化 API 也可用：
+
+```js
+import { compile } from '@linyun-host/cc-react';
+await compile('src/App.tsx', 'dist/ui.lua');
+```
+
+写 `.tsx` 时让编辑器识别框架全局类型（`useState` / `render` / 组件等），在 tsconfig
+里加上 `"types": ["@linyun-host/cc-react/framework"]`（本仓库直接用
+`"include": ["framework/**/*.d.ts"]`）。CLI 需要 Node ≥ 18。
 
 ## 部署
 

@@ -1,22 +1,60 @@
 {
-  "name": "cc-react",
+  "name": "@linyun-host/cc-react",
   "version": "0.1.0",
-  "private": true,
-  "description": "React-style UI framework for CC: Tweaked + Tom's Peripherals GPU. Compiles .tsx to a Lua module whose start(side) runs as a simpleParallel task.",
+  "description": "React-style UI framework for CC: Tweaked + Tom's Peripherals GPU. The cc-react CLI compiles a .tsx app into a single Lua module whose start(side) runs as a simpleParallel task.",
   "type": "module",
+  "bin": {
+    "cc-react": "./compiler/cli.mjs"
+  },
+  "main": "./compiler/compile.mjs",
+  "exports": {
+    ".": {
+      "types": "./compiler/compile.d.ts",
+      "import": "./compiler/compile.mjs"
+    },
+    "./framework": "./framework/index.d.ts"
+  },
+  "files": [
+    "compiler",
+    "runtime",
+    "framework"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "node compiler/index.mjs demo/App.tsx dist/ui.lua",
     "build:fixture": "node compiler/index.mjs scripts/fixtures/multi/App.tsx dist/fixture-multi.lua",
     "build:fixture:scroll": "node compiler/index.mjs scripts/fixtures/scroll/App.tsx dist/fixture-scroll.lua",
     "build:fixture:input": "node compiler/index.mjs scripts/fixtures/input/App.tsx dist/fixture-input.lua",
     "build:fixture:network": "node compiler/index.mjs scripts/fixtures/network/App.tsx dist/fixture-network.lua",
+    "cli": "node compiler/cli.mjs",
     "typecheck": "tsc --noEmit",
     "test": "luac5.1 -p dist/ui.lua && luac5.1 -p dist/fixture-multi.lua && luac5.1 -p dist/fixture-scroll.lua && luac5.1 -p dist/fixture-input.lua && luac5.1 -p dist/fixture-network.lua && lua5.1 scripts/test_main.lua dist/ui.lua && lua5.1 scripts/test_multiimport.lua dist/fixture-multi.lua && lua5.1 scripts/test_scroll.lua dist/fixture-scroll.lua && lua5.1 scripts/test_input.lua dist/fixture-input.lua && lua5.1 scripts/test_network.lua dist/fixture-network.lua",
-    "test:all": "npm run typecheck && npm run build && npm run build:fixture && npm run build:fixture:scroll && npm run build:fixture:input && npm run build:fixture:network && npm run test"
+    "test:all": "npm run typecheck && npm run build && npm run build:fixture && npm run build:fixture:scroll && npm run build:fixture:input && npm run build:fixture:network && npm run test",
+    "prepublishOnly": "npm run test:all"
+  },
+  "keywords": [
+    "computercraft",
+    "cc-tweaked",
+    "toms-peripherals",
+    "react",
+    "jsx",
+    "lua",
+    "compiler",
+    "cli",
+    "gpu"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Hello-World2333/cc-react.git"
   },
   "dependencies": {
     "@babel/parser": "^7.24.0",
-    "esbuild": "^0.20.0",
+    "esbuild": "^0.20.0"
+  },
+  "devDependencies": {
     "typescript": "^5.4.0"
   }
 }
