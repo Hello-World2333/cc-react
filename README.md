@@ -19,8 +19,9 @@ HTTP 客户端，后台任务执行）+ `useRequest`（loading/data/error 三态
 compiler/          JSX → Lua 编译器（esbuild 打包+擦类型 → @babel/parser AST → codegen）
 runtime/           框架运行时（hooks 状态槽、flexbox 布局、脏矩形渲染、事件路由、焦点模型、GPU 适配）
 framework/         全局 TS 类型声明（useState/useEffect/render 与 JSX 组件类型）
-demo/App.tsx       演示入口（计数器 + 条件徽章 + 动态列表 + 键盘输入，import 多个组件文件）
-demo/components/   演示组件（Header / CounterControls / Badge / HistoryList）
+demo/App.tsx       演示入口（6 标签页 showcase：静态渲染 / flexbox / 交互 / 键盘 / 滚动 / 网络）
+demo/components/   演示组件（TabBar + 每标签页一个文件 + CounterControls / Badge / HistoryList）
+demo/lib/          演示辅助模块（theme 颜色常量 / features 数据 / format 纯函数，均为 .ts）
 demo/main.lua      演示主程序（require 编译产物，经 simpleParallel 非阻塞调度 UI 任务）
 scripts/           无头测试（stub GPU + CC 环境：验收标准 + 模块/并行契约 + 多文件 import + 滚动 + 键盘输入 + 网络用例）
 dist/ui.lua        编译产物（模块：require 后由主程序组合调度，拷进电脑即可用）
@@ -84,6 +85,31 @@ UI 任务在 `os.pullEvent` 处让出调度器，因此 UI 渲染不阻塞其他
 广播给所有消费者（无争抢），`simpleParallel.start()` 首次会以空事件启动每个任务，
 所以首帧在第一个事件到来前就已渲染。屏幕至少需要 **3 块横向拼接的显示器**
 （192px 宽；示例的完整界面在 3×4 = 192×256 上最佳，基础界面（含输入框）在 3×3 上即可）。
+
+## 演示应用（showcase）
+
+`demo/` 是一个 6 标签页的完整演示，覆盖（几乎）所有框架功能；编译、部署方式与普通应用
+完全一致（见「部署」），推荐 **3×4 = 192×256** 的显示器拼接。每个标签页一个文件：
+
+- **Home**：静态渲染 —— 标题 + 功能清单（`lib/features.ts` 经 `.map()`）+ 三种 hex 格式
+  色块（`#rgb` / `#rrggbb` / `#aarrggbb`；颜色常量从 `lib/theme.ts` 导入，运行时解析）
+- **Layout**：flexbox 游乐场 —— `J- / J+ / A- / A+` 循环 `justifyContent` / `alignItems`
+  的全部取值（含 `stretch`）；下方展示 padding/margin 的**四边对象**写法
+- **Counter**：交互闭环 —— `useState`（函数式更新 + 数组展开 `[...history, count]`）、
+  `useEffect` 依赖比对、条件渲染徽章（count ≥ 5 出现）、Recorded 列表（`<Scroll>`
+  视口裁剪 + 滚轮 / 拖拽滚动）
+- **Input**：键盘输入 + 焦点 —— 三个受控 `<Input>`（placeholder / 点击聚焦并定位光标 /
+  Tab 与 Shift+Tab 循环焦点 / Enter 触发 `onSubmit` / `onKey` 原始键码 / 长文本随光标
+  水平滚动）
+- **Scroll**：滚动容器 —— 12 行 + 超长行（水平裁剪）+ 底部按钮（滚动后仍可点击，
+  点击穿透），`scrollStep` 可用按钮实时调整（4..24px）
+- **Network**：网络 —— `async/await`（顺序 await / 失败分支 / `await` 非 future 透传）+
+  `useRequest`（挂载自动请求 / loading / error / refetch），worker 内置于 `ui.start()`
+
+演示还顺带展示了多文件 import（组件、`.ts` 工具模块、`import { X as Y }` 别名）、
+模板字符串、`.map()`、数组展开与三元 / `&&` 条件渲染。注意：标签页是条件渲染的子节点，
+切换标签会**重置**该页的本地状态（hook 状态按组件实例路径存放，结构变化即重置槽位
+—— 这是 MVP 的已知行为，见「已知约定/限制」）。
 
 ## 写一个应用
 

@@ -1,59 +1,46 @@
 /**
- * cc-react demo — entry file.
+ * cc-react showcase demo — entry file.
  *
- * Exercises both MVP acceptance criteria (docs/architecture.md §14):
- *   1. static page rendering — styled Box/Text/Button/Panel tree laid out by
- *      the flexbox runtime and drawn to the Tom's Peripherals GPU
- *   2. interaction + dirty-rect loop — button clicks update hooks state,
- *      re-run the component, compare layout trees and repaint only changes
+ * A tabbed app that exercises (almost) every feature of the framework in one
+ * deployable demo. Each tab is a separate showcase component in
+ * demo/components/*:
  *
- * Multi-file demo: the UI is split across files (demo/components/*), imported
- * here with normal import/export statements. The compiler BUNDLES them into
- * the single Lua module before codegen, so deployment stays one ui.lua file.
+ *   Home     — static rendering: title, feature list (lib/features.ts via
+ *              .map()), color swatches in all three hex formats (imported
+ *              from lib/theme.ts, parsed at runtime)
+ *   Layout   — flexbox playground: justifyContent / alignItems cycle through
+ *              every supported value; padding/margin 4-side objects
+ *   Counter  — interaction loop: useState (functional updates + array
+ *              spread), useEffect deps, conditional rendering, recorded
+ *              history in a <Scroll>
+ *   Input    — keyboard input + focus management: three controlled inputs,
+ *              Tab/Shift+Tab cycling, onSubmit, onKey raw codes, long-text
+ *              horizontal scrolling
+ *   Scroll   — <Scroll> viewport: vertical + horizontal clipping, wheel and
+ *              drag scrolling, scrollStep control, click-through
+ *   Network  — async/await + fetch (sequential awaits, error path, await on
+ *              a non-future) + useRequest (loading/data/error + refetch)
  *
- * The `useState` / `useEffect` / `render` globals are provided by the Lua
- * runtime; the compiler maps them onto its hook/entry machinery.
+ * Multi-file demo: every tab, plus the lib/* helper modules (theme constants,
+ * feature data, pure functions — imported with aliases too), lives in its own
+ * file and is bundled into the single Lua module at compile time.
+ *
+ * Tab-local state resets when you switch away and back: tabs are
+ * conditionally rendered children, and hook state is keyed by component
+ * instance path — the documented MVP behavior for structural changes.
  */
 
-import { Header } from './components/Header';
-import { CounterControls } from './components/CounterControls';
-import { BigNumberBadge } from './components/Badge';
-import { HistoryList } from './components/HistoryList';
-
-// Network demo (milestone 3): async/await compiles to an event-driven state
-// machine — `await fetch(...)` starts a request in the background (the
-// networkLoop task) and the rest of the function runs when it resolves. The
-// main program configures the IP stack (ui.configureNetwork); without it the
-// fetch reports the error on screen instead of crashing.
-const DEMO_URL = 'http://192.168.1.4/redstone';
+import { TabBar } from './components/TabBar';
+import { HomeTab } from './components/HomeTab';
+import { LayoutTab } from './components/LayoutTab';
+import { CounterTab } from './components/CounterTab';
+import { InputTab } from './components/InputTab';
+import { ScrollTab } from './components/ScrollTab';
+import { NetworkTab } from './components/NetworkTab';
+import { BG } from './lib/theme';
 
 function App() {
-  const [count, setCount] = useState(0);
-  const [history, setHistory] = useState<number[]>([]);
-  const [lastChange, setLastChange] = useState('count -> 0');
-  const [name, setName] = useState('');
-  const [greeted, setGreeted] = useState(false);
-  const [netStatus, setNetStatus] = useState('press fetch');
-
-  // Demonstrates useEffect: fires only when `count` changes, then re-renders
-  // through a second setState (deps are unchanged on that re-render, so the
-  // effect does not loop).
-  useEffect(() => {
-    setLastChange('count -> ' + count);
-  }, [count]);
-
-  // Async/await demo: the body runs to the first await, then the rest runs
-  // as an event-driven continuation when the fetch resolves.
-  async function fetchHello() {
-    setNetStatus('fetching...');
-    const resp = await fetch(DEMO_URL);
-    if (resp.ok) {
-      const msg = resp.json();
-      setNetStatus(msg && msg.msg ? 'hello: ' + msg.msg : 'status ' + resp.status);
-    } else {
-      setNetStatus('error: ' + (resp.error || ('http ' + resp.status)));
-    }
-  }
+  const [tab, setTab] = useState('home');
 
   return (
     <Panel
@@ -61,52 +48,22 @@ function App() {
         width: '100%',
         height: '100%',
         flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'flex-start',
-        backgroundColor: '#131318',
-        padding: 10,
+        backgroundColor: BG,
+        padding: 8,
       }}
     >
-      <Header count={count} />
+      <TabBar active={tab} onSelect={setTab} />
 
-      <CounterControls
-        onDecrement={() => setCount(count - 1)}
-        onIncrement={() => setCount(count + 1)}
-        onReset={() => setCount(0)}
-        onRecord={() => setHistory([...history, count])}
-      />
-
-      {/* Keyboard input milestone: click to focus, type, Enter submits.
-          Tab/Shift+Tab would cycle focus if there were more inputs. */}
-      <Input
-        value={name}
-        onChange={setName}
-        placeholder="type your name, press enter"
-        style={{ width: '100%', height: 22, marginTop: 6 }}
-        onSubmit={() => {
-          if (name.length > 0) setGreeted(true);
-        }}
-      />
-      <Text style={{ fontSize: 1, color: '#7ec8ff', marginTop: 2 }}>
-        {greeted
-          ? 'hello, ' + name + '!'
-          : name.length > 0
-            ? 'typing: ' + name
-            : 'focus the field, type, press enter'}
-      </Text>
-
-      {/* Network (milestone 3): async/await + fetch (see demo/main.lua for
-          the network stack config) */}
-      <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
-        <Button label="Fetch" style={{ width: 56, height: 24 }} onClick={fetchHello} />
-        <Text style={{ fontSize: 1, color: '#8a8a95' }}>{netStatus}</Text>
+      {/* The tab bar is 50px tall (2 rows); the content box fills the rest of
+          a 3x4 monitor stack (192x256): 256 - 16 padding - 50 = 190. */}
+      <Box style={{ width: '100%', height: 190, flexDirection: 'column' }}>
+        {tab === 'home' && <HomeTab />}
+        {tab === 'layout' && <LayoutTab />}
+        {tab === 'counter' && <CounterTab />}
+        {tab === 'input' && <InputTab />}
+        {tab === 'scroll' && <ScrollTab />}
+        {tab === 'network' && <NetworkTab />}
       </Box>
-
-      <Text style={{ fontSize: 1, color: '#5a5a66', marginTop: 4 }}>{lastChange}</Text>
-
-      {count >= 5 ? <BigNumberBadge /> : null}
-
-      <HistoryList history={history} />
     </Panel>
   );
 }
