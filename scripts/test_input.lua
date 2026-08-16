@@ -44,6 +44,7 @@ local C_FOCUS = signed(0xFF7EC8FF)       -- focusBorderColor / cursorColor
 local C_BORDER = signed(0xFF4A4A5A)      -- default input border
 local C_PLACEHOLDER = signed(0xFF6A6A78) -- placeholderColor
 local C_BG = signed(0xFF17171E)          -- input background
+local C_PANEL = signed(0xFF131318)       -- fixture root panel background
 
 local function inputNodes()
   return t.findNodes(t.uiMod.getTree(), function(n) return n.kind == "input" end)
@@ -364,6 +365,82 @@ boot({
       local in1 = input1()
       check(in1.value == "a", "repeat Backspace deleted a char (auto-repeat works)")
       check(cursorOf(in1.path) == 1, "cursor moved with the repeat deletion")
+    end,
+  },
+})
+
+print("== text overflow beyond a fixed-width input ==")
+-- The fixture inputs are 160px wide. 30 chars = 180px of text: the glyphs
+-- (and the cursor) draw beyond the right edge of the box. The dirty rect
+-- must cover that overflow span — otherwise, when the text shrinks, the
+-- erased region stays too small and stale pixels remain beyond the box.
+local function typeLong(c)
+  return function() return { "tm_keyboard_char", "kb", c } end
+end
+local LONG_30 = "abcdefghijklmnopqrstuvwxyz1234"
+boot({
+  { eventFn = touchAt(input1, 4) },
+  -- type 30 chars: cells 0..29; cell 29 ('4') sits beyond the 160px box
+  { eventFn = typeLong("a") },
+  { eventFn = typeLong("b") },
+  { eventFn = typeLong("c") },
+  { eventFn = typeLong("d") },
+  { eventFn = typeLong("e") },
+  { eventFn = typeLong("f") },
+  { eventFn = typeLong("g") },
+  { eventFn = typeLong("h") },
+  { eventFn = typeLong("i") },
+  { eventFn = typeLong("j") },
+  { eventFn = typeLong("k") },
+  { eventFn = typeLong("l") },
+  { eventFn = typeLong("m") },
+  { eventFn = typeLong("n") },
+  { eventFn = typeLong("o") },
+  { eventFn = typeLong("p") },
+  { eventFn = typeLong("q") },
+  { eventFn = typeLong("r") },
+  { eventFn = typeLong("s") },
+  { eventFn = typeLong("t") },
+  { eventFn = typeLong("u") },
+  { eventFn = typeLong("v") },
+  { eventFn = typeLong("w") },
+  { eventFn = typeLong("x") },
+  { eventFn = typeLong("y") },
+  { eventFn = typeLong("z") },
+  { eventFn = typeLong("1") },
+  { eventFn = typeLong("2") },
+  { eventFn = typeLong("3") },
+  { eventFn = typeLong("4") },
+  {
+    snapshot = function()
+      local in1 = input1()
+      check(in1.value == LONG_30, "30 chars typed (" .. #in1.value .. " chars)")
+      check(in1.x + in1.w < in1.x + 4 + #in1.value * 6,
+        "text (180px) exceeds the fixed box (160px)")
+      -- a pixel in cell 29 (beyond the box right edge) is a glyph pixel,
+      -- not the panel background — the overflow is really painted
+      local px = stub.buf[in1.y + 4][in1.x + 178]
+      check(px ~= C_PANEL, "text visibly overflows the box edge")
+    end,
+  },
+  -- Backspace: the old 30th char + old cursor bar sat beyond the box — they
+  -- must be erased (panel bg), not left as ghost pixels.
+  { eventFn = kbKey(259) },
+  {
+    snapshot = function()
+      local in1 = input1()
+      check(in1.value == "abcdefghijklmnopqrstuvwxyz123",
+        "backspace shortened the text to 29 chars")
+      -- cells 0..28 end at x+4+28*6+5 = x+177; the new cursor is a 2px bar
+      -- at x+178..179. Everything beyond it (old '4' glyph at x+178..183,
+      -- old cursor bar at x+184..185) must show the panel background.
+      local row = in1.y + 4
+      local ghost = 0
+      for x = in1.x + 180, in1.x + 196 do
+        if stub.buf[row][x] ~= C_PANEL then ghost = ghost + 1 end
+      end
+      check(ghost == 0,
+        "no ghost pixels beyond the box after backspace (" .. ghost .. " stale px)")
     end,
   },
 })

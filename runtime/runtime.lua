@@ -1019,10 +1019,57 @@ local function __addRect(rects, x, y, w, h)
   table.insert(rects, { x - DIRTY_PAD, y - DIRTY_PAD, w + DIRTY_PAD * 2, h + DIRTY_PAD * 2 })
 end
 
+-- Full drawn extent of a node for dirty-rect purposes. Text-like nodes
+-- (text/button/input) draw their glyphs WITHOUT clipping to the box: an
+-- input with a fixed width shows its text (and the blinking cursor) beyond
+-- the right edge. The dirty rect must cover that whole span — otherwise
+-- editing shrinks the text or moves the cursor and the region beyond the box
+-- keeps stale pixels (ghost glyphs / a ghost cursor bar).
+local function __visualRect(node)
+  local x, y, w, h = node.x, node.y, node.w, node.h
+  local left, right, top, bottom = x, x + w, y, y + h
+  local kind = node.kind
+  if kind == "text" or kind == "button" or kind == "input" then
+    local s = node.style
+    local fs = s.fontSize or 1
+    local tp = s.textPadding or 1
+    local str
+    if kind == "text" then
+      str = node.text or ""
+    elseif kind == "button" then
+      str = node.label or ""
+    else
+      str = node.value or ""
+      if #str == 0 then str = node.placeholder or "" end
+    end
+    local tw = __gpu.getTextLength(str, fs, tp)
+    local th = FONT_H * fs
+    local tx, ty
+    if kind == "button" then
+      tx = math.floor(x + (w - tw) / 2 + 0.5)
+      ty = math.floor(y + (h - th) / 2 + 0.5)
+    else
+      tx = x + (s.paddingL or 0)
+      ty = y + (s.paddingT or 0)
+    end
+    if tx < left then left = tx end
+    if tx + tw > right then right = tx + tw end
+    if ty < top then top = ty end
+    if ty + th > bottom then bottom = ty + th end
+    if kind == "input" then
+      -- the blinking cursor is a 2px bar right after the text
+      if right < tx + tw + 2 then right = tx + tw + 2 end
+    end
+  end
+  return left, top, right - left, bottom - top
+end
+
 local function __compareTrees(a, b, rects)
   if not __sameNode(a, b) then
-    __addRect(rects, a.x, a.y, a.w, a.h)
-    __addRect(rects, b.x, b.y, b.w, b.h)
+    local ax, ay, aw, ah = __visualRect(a)
+    local bx, by, bw, bh = __visualRect(b)
+    __addRect(rects, ax, ay, aw, ah)
+    __addRect(rects, bx, by, bw, bh)
     return
   end
   local na, nb = #a.children, #b.children
@@ -1032,9 +1079,11 @@ local function __compareTrees(a, b, rects)
     if ac and bc then
       __compareTrees(ac, bc, rects)
     elseif ac then
-      __addRect(rects, ac.x, ac.y, ac.w, ac.h)
+      local ax, ay, aw, ah = __visualRect(ac)
+      __addRect(rects, ax, ay, aw, ah)
     elseif bc then
-      __addRect(rects, bc.x, bc.y, bc.w, bc.h)
+      local bx, by, bw, bh = __visualRect(bc)
+      __addRect(rects, bx, by, bw, bh)
     end
   end
 end

@@ -223,6 +223,9 @@ Enter 257 / Tab 258 / Backspace 259 / Delete 261 / Left 263 / Right 262 / Home 2
 - `useState` 状态按「组件实例 DFS 路径」存放；结构静态时稳定，条件渲染换组件会重置对应槽位（keyed list 里程碑解决）。
 - `Input` 的 `value` 是受控的（app 通过 `onChange` 更新）；宽度默认跟随内容
   （value/placeholder 的测量宽度），值变化会改变盒子大小 —— 需要稳定宽度时显式设置 `width`。
+- `Input` 的文本**不裁剪**：固定宽度下文本（和光标）会画到盒子右缘之外；脏矩形按「盒子 ∪
+  文本实际绘制范围」计算，因此缩短文本/移动光标不会在盒子外留下残影（字形逐像素越界仍由
+  `DIRTY_PAD` 覆盖）。想让超长文本隐藏的话需自行把输入框放进 `<Scroll>` 之类裁剪容器。
 - 光标闪烁由 `os.startTimer(0.5)` 驱动：输入框聚焦时每 0.5s 产生一次极小脏矩形重绘；
   按键/点击会重置闪烁并重新计时。对性能敏感的场景可在 `onChange` 中自行管理。
 - 键盘事件只走 Tom's Peripherals 前缀形态（`tm_keyboard_*`，`fireNativeEvents` 默认 false）；
