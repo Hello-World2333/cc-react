@@ -38,8 +38,7 @@ npm run test:all   # typecheck + build + test
 
 ## CLI（npm 包）
 
-编译器已封装为 `cc-react` CLI，并已准备好发布到 npm（`@linyun-host/cc-react`，
-**尚未实际发布**）。安装后在自己的项目里编译应用：
+编译器已封装为 `cc-react` CLI，已发布到 npm（`@linyun-host/cc-react`)
 
 ```bash
 npm i -D @linyun-host/cc-react
