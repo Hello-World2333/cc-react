@@ -3,51 +3,81 @@
  *
  * The framework is NOT imported: `useState` / `useEffect` / `render` and the
  * Box / Panel / Text / Button / Scroll / Input components are globals provided
- * by the Lua runtime embedded in the compiled module. The compiler maps these
- * names onto the runtime's hook/entry machinery and node factories.
+ * by the Lua runtime embedded in the compiled module.
  *
- * Usage — add to your tsconfig.json:
- *   "types": ["@linyun-host/cc-react/framework"]
+ * Setup — in your tsconfig.json:
+ *   "compilerOptions": {
+ *     "jsx": "react-jsx",                           // ← 必须用 react-jsx
+ *     "types": ["@linyun-host/cc-react/framework"]
+ *   }
  *
- * This makes all globals (hooks, components, JSX namespace) available in your
- * .tsx files without any import statements. For referencing prop types in your
- * own code (e.g. wrapper components), use the named exports:
+ * With `"jsx": "react-jsx"`, TypeScript resolves JSX without requiring a
+ * global `React` variable — no conflict with `@types/react` or DOM libs.
  *
+ * For referencing prop types in wrapper components, use named exports:
  *   import type { Style, BoxProps, InputProps } from '@linyun-host/cc-react/framework';
  *
- * The compiled output is a MODULE: the top-level `render(<App/>)` only mounts
- * the root component (__mount); the module returns a table whose `start(side)`
- * is a simpleParallel task — the main program composes it, e.g.
- *   local ui = require("ui")
- *   simpleParallel.add(function() ui.start("left") end)
- *   simpleParallel.start()
- *
- * `React` is declared only so TS's classic JSX mode type-checks capitalized
- * tags (`<Panel/>` → React.createElement(Panel, ...)); it never reaches the
- * compiled output.
+ * `React` is NOT declared here. If your project also uses React, install
+ * `@types/react` normally — cc-react types are fully compatible.
  */
 
 // ---------------------------------------------------------------------------
-// All global declarations live inside `declare global` so that the file can
-// both (a) act as a module with named exports AND (b) inject globals into
-// every .tsx file that includes this type root.
+// Module-level type declarations (NOT global).
+//
+// These live outside `declare global` so they do NOT merge with DOM built-in
+// types (lib.dom.d.ts).  Users with `@types/react` or DOM libs loaded will
+// not see "重复的标识符" or "所有声明必须具有相同的修饰符" errors.
+// ---------------------------------------------------------------------------
+
+/** Options for the cc-react `fetch`. */
+interface FetchOptions {
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | string;
+  headers?: Record<string, string>;
+  /** A plain object body is JSON-encoded and sent as `application/json`. */
+  body?: string | Record<string, unknown>;
+}
+
+/**
+ * cc-react HTTP response (docs/lib http client).
+ *
+ * Named `FetchResponse` to avoid merging with the DOM `Response` type.
+ * - `ok` is `true` for 2xx status codes.
+ * - Failures resolve with `{ ok: false, error: <message> }`.
+ */
+interface FetchResponse {
+  ok: boolean;
+  status?: number;
+  statusText?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  error?: string;
+  /** Read the response body as a plain string. */
+  text(): string;
+  /** Parse the response body as JSON. */
+  json(): any;
+}
+
+/** Three-state data-fetch hook state. */
+interface FetchRequestState<T> {
+  data: T | null;
+  loading: boolean;
+  error: string | null;
+  /** Re-run the fetcher immediately (even when deps are unchanged). */
+  refetch: () => void;
+}
+
+// ---------------------------------------------------------------------------
+// Global declarations — hooks, components, JSX namespace.
+//
+// Wrapped in `declare global` so they are visible in every .tsx file when
+// this file is included via `"types": ["@linyun-host/cc-react/framework"]`.
 // ---------------------------------------------------------------------------
 
 declare global {
-  // ----- React shim (classic JSX transform only) -----
-
-  /** @internal Shim for classic JSX transform (`"jsx": "react"`). */
-  // eslint-disable-next-line no-var
-  var React: {
-    createElement: (type: unknown, props: unknown, ...children: unknown[]) => JSX.Element;
-  };
-
   // ----- Hooks -----
 
   /**
    * Create a stateful value. Returns `[value, setValue]`.
-   *
-   * `setValue` accepts a new value or an updater function `(prev) => next`.
    *
    * ```tsx
    * const [count, setCount] = useState(0);
@@ -78,58 +108,10 @@ declare global {
   // eslint-disable-next-line no-var
   var render: (element: JSX.Element) => void;
 
-  // ----- Network (async/await + fetch) -----
+  // ----- Network -----
 
   /**
-   * A runtime "future" — an async operation the UI can `await`. Typed as
-   * PromiseLike so TypeScript unwraps `await` to the response type; the Lua
-   * runtime resolves it via an event-driven continuation (no native promise /
-   * coroutine).
-   */
-  type Future<T> = PromiseLike<T>;
-
-  /** Options for `fetch`. */
-  interface FetchOptions {
-    method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | string;
-    headers?: Record<string, string>;
-    /** A plain object body is JSON-encoded and sent as `application/json`. */
-    body?: string | Record<string, unknown>;
-  }
-
-  /**
-   * HTTP response (docs/lib http client).
-   *
-   * - `ok` is `true` for 2xx status codes.
-   * - Failures (network error / DNS / timeout / client not configured) resolve
-   *   with `{ ok: false, error: <message> }` so you can branch on `resp.ok`
-   *   without try/catch (v1 does not compile await try/catch).
-   */
-  interface Response {
-    ok: boolean;
-    status?: number;
-    statusText?: string;
-    headers?: Record<string, string>;
-    body?: string;
-    error?: string;
-    /** Read the response body as a plain string. */
-    text(): string;
-    /** Parse the response body as JSON. */
-    json(): any;
-  }
-
-  /** Three-state data-fetch hook state. */
-  interface RequestState<T> {
-    data: T | null;
-    loading: boolean;
-    error: string | null;
-    /** Re-run the fetcher immediately (even when deps are unchanged). */
-    refetch: () => void;
-  }
-
-  /**
-   * Fetch data from the network. Runs in the background (the networkLoop
-   * task, composed by the main program) so the UI never blocks; returns a
-   * future to `await`.
+   * Fetch data from the network. Returns a future to `await`.
    *
    * ```tsx
    * async function load() {
@@ -139,12 +121,10 @@ declare global {
    * ```
    */
   // eslint-disable-next-line no-var
-  var fetch: (url: string, options?: FetchOptions) => Future<Response>;
+  var fetch: (url: string, options?: FetchOptions) => PromiseLike<FetchResponse>;
 
   /**
-   * Data-fetch hook with loading / data / error states. Fetches on mount and
-   * whenever `deps` change; stale responses (an older request resolving after
-   * a newer one started) are discarded. `fetcher` must return a future.
+   * Data-fetch hook with loading / data / error states.
    *
    * ```tsx
    * const req = useRequest(() => fetch(URL));
@@ -152,12 +132,12 @@ declare global {
    * ```
    */
   // eslint-disable-next-line no-var
-  var useRequest: <T = Response>(
-    fetcher: () => Future<T>,
+  var useRequest: <T = FetchResponse>(
+    fetcher: () => PromiseLike<T>,
     deps?: readonly unknown[],
-  ) => RequestState<T>;
+  ) => FetchRequestState<T>;
 
-  // ----- Components (global) -----
+  // ----- Components -----
 
   var Box: (props: BoxProps) => JSX.Element;
   var Panel: (props: BoxProps) => JSX.Element;
@@ -174,8 +154,7 @@ declare global {
     /**
      * Common layout / style surface understood by the flexbox runtime.
      *
-     * Colors accept `"#rgb"`, `"#rrggbb"`, or `"#aarrggbb"` — they are
-     * compiled to ARGB numbers at build time.
+     * Colors: `"#rgb"` / `"#rrggbb"` / `"#aarrggbb"` — compiled to ARGB.
      */
     interface Style {
       flexDirection?: 'row' | 'column';
@@ -193,19 +172,13 @@ declare global {
       padding?: number | { top?: number; right?: number; bottom?: number; left?: number };
       backgroundColor?: string;
       color?: string;
-      /** Background painted behind text glyphs (drawText bg; nil = none). */
       textBackgroundColor?: string;
       fontSize?: number;
       borderColor?: string;
-      /** Pressed background for buttons (needs tm_monitor_mouse_click/up). */
       pressedColor?: string;
-      /** Focus ring border color for focused inputs. */
       focusBorderColor?: string;
-      /** Input text color while the value is empty (placeholder shown). */
       placeholderColor?: string;
-      /** Input cursor (insertion point) color. */
       cursorColor?: string;
-      /** Scroll only: px per mouse-wheel notch (default 8 = one 5×8 row). */
       scrollStep?: number;
     }
 
@@ -219,7 +192,7 @@ declare global {
 
     interface TextProps {
       style?: Style;
-      children?: string | number;
+      children?: string | number | (string | number)[];
     }
 
     interface ButtonProps {
@@ -240,14 +213,11 @@ declare global {
     }
 
     /**
-     * Text input (controlled). The value lives in the app's `useState` and is
-     * updated via `onChange`. Built-in editing: character insert at cursor,
-     * Backspace / Delete / arrows / Home / End, Enter fires `onSubmit`,
-     * Tab / Shift+Tab cycles focus. Clicking places the cursor at the click.
+     * Text input (controlled). Built-in editing: insert / Backspace / Delete
+     * / arrows / Home / End / Enter(onSubmit) / Tab(focus cycle).
      *
-     * `onKey` raw key codes are GLFW codes (Tom's Peripherals keyboard passes
-     * Minecraft key codes through): Enter 257, Tab 258, Backspace 259,
-     * Delete 261, Left 263, Right 262, Home 268, End 269, Shift 340/344.
+     * Key codes (GLFW): Enter 257, Tab 258, Backspace 259, Delete 261,
+     * Left 263, Right 262, Home 268, End 269, Shift 340/344.
      */
     interface InputProps {
       style?: Style;
@@ -255,7 +225,6 @@ declare global {
       placeholder?: string;
       onChange?: (value: string) => void;
       onSubmit?: () => void;
-      /** Raw key hook — `isUp` is `false` on press/repeat, `true` on release. */
       onKey?: (key: number, isUp: boolean) => void;
     }
 
@@ -277,8 +246,8 @@ declare global {
 }
 
 // ---------------------------------------------------------------------------
-// Named exports — so users can reference prop types in wrapper components:
-//   import type { Style, BoxProps, InputProps } from '@linyun-host/cc-react/framework';
+// Named exports — for wrapper components:
+//   import type { Style, BoxProps, FetchResponse } from '@linyun-host/cc-react/framework';
 // ---------------------------------------------------------------------------
 
 export type Style = globalThis.JSX.Style;
@@ -287,4 +256,4 @@ export type TextProps = globalThis.JSX.TextProps;
 export type ButtonProps = globalThis.JSX.ButtonProps;
 export type ScrollProps = globalThis.JSX.ScrollProps;
 export type InputProps = globalThis.JSX.InputProps;
-export type { Future, FetchOptions, Response, RequestState };
+export type { FetchOptions, FetchResponse, FetchRequestState };

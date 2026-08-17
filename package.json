@@ -4,7 +4,8 @@
   "description": "React-style UI framework for CC: Tweaked + Tom's Peripherals GPU. The cc-react CLI compiles a .tsx app into a single Lua module whose start(side) runs as a simpleParallel task.",
   "type": "module",
   "bin": {
-    "cc-react": "./compiler/cli.mjs"
+    "cc-react": "./compiler/cli.mjs",
+    "create-cc-react": "./create/cli.mjs"
   },
   "main": "./compiler/compile.mjs",
   "exports": {
@@ -17,7 +18,8 @@
   "files": [
     "compiler",
     "runtime",
-    "framework"
+    "framework",
+    "create"
   ],
   "engines": {
     "node": ">=18"

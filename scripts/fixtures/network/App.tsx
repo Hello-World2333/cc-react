@@ -76,7 +76,7 @@ function NetworkDemo() {
       </Box>
 
       <Text style={{ color: '#8a8a95', marginTop: 8 }}>useRequest</Text>
-      <Text style={{ color: '#ffd866' }}>req: {req.loading ? 'loading' : req.error ? req.error : req.data ? req.data.body : 'empty'}</Text>
+      <Text style={{ color: '#ffd866' }}>req: {req.loading ? 'loading' : req.error ? req.error : req.data ? (req.data.body ?? 'empty') : 'empty'}</Text>
       <Box style={{ flexDirection: 'row', gap: 8, marginTop: 4 }}>
         <Button label="refetch" onClick={req.refetch} style={{ width: 72, height: 24 }} />
         <Button label="count+" onClick={() => setCount(count + 1)} style={{ width: 72, height: 24 }} />

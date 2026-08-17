@@ -3,13 +3,17 @@
     "target": "ES2020",
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "jsx": "react",
+    "jsx": "react-jsx",
     "lib": ["ES2020"],
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "types": []
+    "types": [],
+    "paths": {
+      "react/jsx-runtime": ["./framework/react/jsx-runtime"]
+    },
+    "baseUrl": "."
   },
   "include": ["demo/**/*.tsx", "demo/**/*.ts", "framework/**/*.d.ts", "compiler/**/*.d.ts", "scripts/fixtures/**/*.tsx", "scripts/fixtures/**/*.ts"]
 }
