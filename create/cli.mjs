@@ -42,7 +42,6 @@ const PACKAGE_JSON = (name) => JSON.stringify({
   },
   devDependencies: {
     '@linyun-host/cc-react': '^0.1.1',
-    '@types/react': '^18.0.0',
     'typescript': '^5.4.0',
   },
 }, null, 2) + '\n';
@@ -59,6 +58,10 @@ const TSCONFIG = JSON.stringify({
     skipLibCheck: true,
     forceConsistentCasingInFileNames: true,
     types: ['@linyun-host/cc-react/framework'],
+    baseUrl: '.',
+    paths: {
+      'react/jsx-runtime': ['./node_modules/@linyun-host/cc-react/framework/react/jsx-runtime'],
+    },
   },
   include: ['src/**/*.tsx', 'src/**/*.ts'],
 }, null, 2) + '\n';
