@@ -36,12 +36,13 @@ const PACKAGE_JSON = (name) => JSON.stringify({
   private: true,
   type: 'module',
   scripts: {
-    build: 'cc-react src/main.tsx dist/ui.lua',
-    dev: 'cc-react src/main.tsx dist/ui.lua --watch',
+    build: 'cc-react src/App.tsx dist/ui.lua',
+    dev: 'cc-react src/App.tsx dist/ui.lua --watch',
     typecheck: 'tsc --noEmit',
   },
   devDependencies: {
     '@linyun-host/cc-react': '^0.1.1',
+    '@types/react': '^18.0.0',
     'typescript': '^5.4.0',
   },
 }, null, 2) + '\n';
@@ -57,33 +58,28 @@ const TSCONFIG = JSON.stringify({
     noEmit: true,
     skipLibCheck: true,
     forceConsistentCasingInFileNames: true,
-    types: [],
-    paths: {
-      'react/jsx-runtime': ['./node_modules/@linyun-host/cc-react/framework/react/jsx-runtime'],
-    },
+    types: ['@linyun-host/cc-react/framework'],
   },
-  include: ['src/**/*.tsx', 'src/**/*.ts', 'node_modules/@linyun-host/cc-react/framework/**/*.d.ts'],
+  include: ['src/**/*.tsx', 'src/**/*.ts'],
 }, null, 2) + '\n';
 
-const APP_TSX = `import { BG, FG, ACCENT } from './theme';
-
-function App() {
+const APP_TSX = `function App() {
   const [count, setCount] = useState(0);
 
   return (
-    <Panel
+    <Box
       style={{
         width: '100%',
         height: '100%',
         flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
-        backgroundColor: BG,
+        backgroundColor: '#131318',
         padding: 10,
       }}
     >
-      <Text style={{ fontSize: 3, color: FG }}>cc-react</Text>
-      <Text style={{ fontSize: 2, color: ACCENT, marginTop: 8 }}>
+      <Text style={{ fontSize: 3, color: '#ffffff' }}>cc-react</Text>
+      <Text style={{ fontSize: 2, color: '#7ec8ff', marginTop: 8 }}>
         Count: {count}
       </Text>
       <Box style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
@@ -98,20 +94,9 @@ function App() {
           onClick={() => setCount(count + 1)}
         />
       </Box>
-    </Panel>
+    </Box>
   );
 }
-
-render(<App />);
-`;
-
-const THEME_TS = `// Color constants (ARGB hex, parsed at runtime by the framework).
-export const BG = '#131318';
-export const FG = '#ffffff';
-export const ACCENT = '#7ec8ff';
-`;
-
-const MAIN_TSX = `import { App } from './App';
 
 render(<App />);
 `;
@@ -181,8 +166,6 @@ async function main() {
   write(path.join(projectDir, 'package.json'), PACKAGE_JSON(projectName));
   write(path.join(projectDir, 'tsconfig.json'), TSCONFIG);
   write(path.join(projectDir, 'src/App.tsx'), APP_TSX);
-  write(path.join(projectDir, 'src/theme.ts'), THEME_TS);
-  write(path.join(projectDir, 'src/main.tsx'), MAIN_TSX);
   write(path.join(projectDir, 'main.lua'), MAIN_LUA);
 
   console.log('  Generated files:');
@@ -190,8 +173,6 @@ async function main() {
   console.log('    package.json');
   console.log('    tsconfig.json');
   console.log('    src/App.tsx');
-  console.log('    src/theme.ts');
-  console.log('    src/main.tsx');
   console.log('    main.lua');
 
   // Install dependencies
@@ -207,7 +188,7 @@ async function main() {
   Done! Get started:
 
     cd ${projectName}
-    npm run build          # compile src/main.tsx -> dist/ui.lua
+    npm run build          # compile src/App.tsx -> dist/ui.lua
     npm run dev            # watch mode (auto-rebuild on save)
 
   Deploy to CC: Tweaked:
