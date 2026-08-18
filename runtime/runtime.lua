@@ -1817,10 +1817,10 @@ local function __drawNode(node, clip)
       local bc = disabled and 0xFF333340 or s.borderColor
       __gpu.rectangle(node.x, node.y, w, h, bc, clip)
     end
-    -- Knob: 7×7 centered vertically, horizontal position depends on on/off.
-    -- Padding of 1px around the knob inside the track.
-    local knobSize = 7
-    local knobY = node.y + math.floor((h - knobSize) / 2)
+    -- Knob: square, sized from track height (1px padding each side),
+    -- horizontal position depends on on/off.
+    local knobSize = math.max(3, h - 2)
+    local knobY = node.y + 1
     local knobX
     if isOn then
       knobX = node.x + w - knobSize - 1  -- right side
