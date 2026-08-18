@@ -1542,7 +1542,7 @@ local function __assignPaths(node, path, parent)
   -- cursorVisible drives the blink repaint
   local inState = __inputState[path]
   local cur = inState and inState.cursor or 0
-  local vlen = node.value and #node.value or 0
+  local vlen = (type(node.value) == "string") and #node.value or 0
   if cur < 0 then cur = 0 elseif cur > vlen then cur = vlen end
   if inState and inState.cursor ~= cur then inState.cursor = cur end
   node.cursor = cur
