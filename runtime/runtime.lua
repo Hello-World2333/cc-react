@@ -1157,6 +1157,42 @@ local function __netPendingJobs()
   return out
 end
 
+-- ---- setTimeout / setInterval -------------------------------------------
+-- JavaScript-compatible timer API backed by CC: Tweaked's os.startTimer().
+--
+-- setTimeout(fn, ms)  → one-shot timer, returns id
+-- setInterval(fn, ms) → repeating timer, returns id
+-- clearTimeout(id)    → cancel a pending setTimeout
+-- clearInterval(id)   → cancel a pending setInterval
+--
+-- CC timers are event-driven: os.startTimer(seconds) returns a numeric id,
+-- and a "timer" event fires when it expires. We maintain a mapping table so
+-- the UI event loop can route timer events to user callbacks.
+local __timers = {}   -- our_id -> { callback, repeating, ms, ccId }
+local __timerSeq = 0
+
+-- Shared implementation: the codegen emits __timerNew(cb, ms, false) for
+-- setTimeout and __timerNew(cb, ms, true) for setInterval, keeping the
+-- number of top-level locals at 200.
+local function __timerNew(callback, ms, repeating)
+  local delay = (ms or 0) / 1000
+  __timerSeq = __timerSeq + 1
+  local id = __timerSeq
+  local ok, ccId = pcall(os.startTimer, delay)
+  if ok and ccId then
+    __timers[id] = { callback = callback, repeating = repeating, ms = ms, ccId = ccId }
+  end
+  return id
+end
+
+local function __clearTimer(id)
+  local t = __timers[id]
+  if t then
+    if t.ccId and os.cancelTimer then pcall(os.cancelTimer, t.ccId) end
+    __timers[id] = nil
+  end
+end
+
 -- ---- useRequest ----------------------------------------------------------
 -- Three-state data-fetch hook: { data, loading, error, refetch }. fetcher()
 -- must return a future (typically () => fetch(url)). Fetches on mount and
@@ -2022,16 +2058,36 @@ local function __handleEvent(e)
       __resolveFuture(f, resp)
     end
   elseif name == "timer" then
+    local ccId = e[2]
     -- cursor blink tick for the focused input
-    local id = e[2]
     local st = __focusedPath and __inputState[__focusedPath]
-    if st and st.timer == id then
+    if st and st.timer == ccId then
       st.blink = not st.blink
       __scheduleRender()
       if os.startTimer then
         local ok, id2 = pcall(os.startTimer, BLINK_INTERVAL)
         if ok and id2 then st.timer = id2 end
       end
+    end
+    -- user timers (setTimeout / setInterval)
+    local ourId, t = nil, nil
+    for tid, tt in pairs(__timers) do
+      if tt.ccId == ccId then ourId, t = tid, tt; break end
+    end
+    if t then
+      if t.repeating then
+        -- restart the interval timer
+        local ok, newCcId = pcall(os.startTimer, t.ms / 1000)
+        if ok and newCcId then
+          t.ccId = newCcId
+        else
+          __timers[ourId] = nil
+        end
+      else
+        __timers[ourId] = nil
+      end
+      local ok, err = pcall(t.callback)
+      if not ok then print("cc-react: timer callback error: " .. tostring(err)) end
     end
   end
 end

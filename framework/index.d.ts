@@ -137,6 +137,40 @@ declare global {
     deps?: readonly unknown[],
   ) => FetchRequestState<T>;
 
+  // ----- Timers -----
+
+  /**
+   * Run a callback after a delay (milliseconds). Returns a numeric id
+   * that can be passed to `clearTimeout` to cancel it.
+   *
+   * ```tsx
+   * const id = setTimeout(() => print('hello'), 1000);
+   * clearTimeout(id); // cancel
+   * ```
+   */
+  // eslint-disable-next-line no-var
+  var setTimeout: (callback: () => void, ms: number) => number;
+
+  /**
+   * Run a callback repeatedly at an interval (milliseconds). Returns a
+   * numeric id that can be passed to `clearInterval` to cancel it.
+   *
+   * ```tsx
+   * const id = setInterval(() => print('tick'), 500);
+   * clearInterval(id); // cancel
+   * ```
+   */
+  // eslint-disable-next-line no-var
+  var setInterval: (callback: () => void, ms: number) => number;
+
+  /** Cancel a pending `setTimeout`. */
+  // eslint-disable-next-line no-var
+  var clearTimeout: (id: number) => void;
+
+  /** Cancel a pending `setInterval`. */
+  // eslint-disable-next-line no-var
+  var clearInterval: (id: number) => void;
+
   // ----- Components -----
 
   var Box: (props: BoxProps) => JSX.Element;

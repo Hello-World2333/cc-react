@@ -32,10 +32,11 @@
     "build:fixture:network": "node compiler/index.mjs scripts/fixtures/network/App.tsx dist/fixture-network.lua",
     "cli": "node compiler/cli.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "luac5.1 -p dist/ui.lua && luac5.1 -p dist/fixture-multi.lua && luac5.1 -p dist/fixture-scroll.lua && luac5.1 -p dist/fixture-input.lua && luac5.1 -p dist/fixture-network.lua && luac5.1 -p dist/fixture-chinese.lua && lua5.1 scripts/test_main.lua dist/ui.lua && lua5.1 scripts/test_multiimport.lua dist/fixture-multi.lua && lua5.1 scripts/test_scroll.lua dist/fixture-scroll.lua && lua5.1 scripts/test_input.lua dist/fixture-input.lua && lua5.1 scripts/test_network.lua dist/fixture-network.lua && lua5.1 scripts/test_chinese.lua dist/fixture-chinese.lua",
-    "test:all": "npm run typecheck && npm run build && npm run build:fixture && npm run build:fixture:scroll && npm run build:fixture:input && npm run build:fixture:network && npm run build:fixture:chinese && npm run test",
+    "test": "luac5.1 -p dist/ui.lua && luac5.1 -p dist/fixture-multi.lua && luac5.1 -p dist/fixture-scroll.lua && luac5.1 -p dist/fixture-input.lua && luac5.1 -p dist/fixture-network.lua && luac5.1 -p dist/fixture-chinese.lua && luac5.1 -p dist/fixture-timer.lua && lua5.1 scripts/test_main.lua dist/ui.lua && lua5.1 scripts/test_multiimport.lua dist/fixture-multi.lua && lua5.1 scripts/test_scroll.lua dist/fixture-scroll.lua && lua5.1 scripts/test_input.lua dist/fixture-input.lua && lua5.1 scripts/test_network.lua dist/fixture-network.lua && lua5.1 scripts/test_chinese.lua dist/fixture-chinese.lua && lua5.1 scripts/test_timer.lua dist/fixture-timer.lua",
+    "test:all": "npm run typecheck && npm run build && npm run build:fixture && npm run build:fixture:scroll && npm run build:fixture:input && npm run build:fixture:network && npm run build:fixture:chinese && npm run build:fixture:timer && npm run test",
     "prepublishOnly": "npm run test:all",
-    "build:fixture:chinese": "node compiler/index.mjs scripts/fixtures/chinese/App.tsx dist/fixture-chinese.lua"
+    "build:fixture:chinese": "node compiler/index.mjs scripts/fixtures/chinese/App.tsx dist/fixture-chinese.lua",
+    "build:fixture:timer": "node compiler/index.mjs scripts/fixtures/timer/App.tsx dist/fixture-timer.lua"
   },
   "keywords": [
     "computercraft",

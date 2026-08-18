@@ -100,6 +100,15 @@ const MAPPED_FUNCS = {
   useEffect: '__useEffect',
   fetch: '__fetch',
   useRequest: '__useRequest',
+  clearTimeout: '__clearTimer',
+  clearInterval: '__clearTimer',
+};
+
+// Functions that need extra hidden arguments appended (used to share an
+// implementation behind two JS names while keeping one local).
+const MAPPED_FUNCS_EXTRA_ARG = {
+  setTimeout: ['__timerNew', 'false'],
+  setInterval: ['__timerNew', 'true'],
 };
 
 /** JSX whitespace rule: text containing a newline gets its lines trimmed and
@@ -787,6 +796,10 @@ export class Codegen {
     if (callee.type === 'Identifier') {
       const name = callee.name;
       if (MAPPED_FUNCS[name]) return `${MAPPED_FUNCS[name]}(${args.join(', ')})`;
+      if (MAPPED_FUNCS_EXTRA_ARG[name]) {
+        const [fn, extra] = MAPPED_FUNCS_EXTRA_ARG[name];
+        return `${fn}(${args.join(', ')}, ${extra})`;
+      }
       if (name === 'String') return `tostring(${args.join(', ')})`;
       if (name === 'Number') return `tonumber(${args.join(', ')})`;
       if (name === 'render') throw new CodegenError('render() is only allowed at top level');

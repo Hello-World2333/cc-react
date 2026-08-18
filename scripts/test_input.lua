@@ -83,7 +83,12 @@ local function kbPaste(text)
   return function() return { "tm_keyboard_paste", "kb_0", text } end
 end
 local function timerTick()
-  return function() return { "timer", 1 } end
+  return function()
+    -- Read the actual CC timer id from the focused input's state so the
+    -- event always matches, even when startTimer returns incrementing ids.
+    local st = t.uiMod.getInputState(t.uiMod.getFocused())
+    return { "timer", st and st.timer or 1 }
+  end
 end
 
 print("== input fixture: layout, placeholder, focus ring ==")

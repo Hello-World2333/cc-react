@@ -286,12 +286,19 @@ local function sanitizeEventArg(v, depth)
   return v
 end
 
+-- Timer id counter: each os.startTimer call gets a unique id so that
+-- multiple timers (cursor blink + user timers) can coexist.
+local __timerIdSeq = 0
+
 _G.os = {
   pullEvent = osPullEvent,
   shutdown = function() end,
-  -- the cursor blink uses os.startTimer/cancelTimer; a single fixed id is
-  -- enough for the step-script (tests feed {"timer", 1} to tick the blink)
-  startTimer = function() return 1 end,
+  -- the cursor blink uses os.startTimer/cancelTimer; each call gets a unique
+  -- id so that multiple timers (cursor blink + user timers) coexist
+  startTimer = function()
+    __timerIdSeq = __timerIdSeq + 1
+    return __timerIdSeq
+  end,
   cancelTimer = function() end,
   -- the network bridge (fetch) signals the worker task and reports results
   -- through queued events; pullEventDirect drains them before the step script
@@ -370,6 +377,10 @@ function t.boot(steps, extraTask, preStart)
   t.stub.calls = {}
   t.stub.order = {}
   t.stub.wrapCalls = {}
+  -- Reset the timer id counter so each boot starts from 1. This lets test
+  -- scripts predict which id os.startTimer will return (important for timer
+  -- event routing in setTimeout/setInterval tests).
+  __timerIdSeq = 0
   local ok, res = pcall(dofile, t.MAIN)
   if not ok then
     error("test harness: boot failed: " .. tostring(res))
@@ -459,5 +470,9 @@ function t.deepCopy(buf)
   end
   return out
 end
+
+-- Read the current timer id counter (for test scripts that need to predict
+-- which id os.startTimer will return next).
+function t.getTimerSeq() return __timerIdSeq end
 
 return t
