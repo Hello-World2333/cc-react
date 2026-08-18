@@ -121,4 +121,29 @@ function util.bitAnd(a, b)
     return result
 end
 
+---@param a number
+---@param b number
+---@return number
+function util.bitOr(a, b)
+    local result = 0
+    local bit = 1
+    while a > 0 or b > 0 do
+        if a % 2 == 1 or b % 2 == 1 then
+            result = result + bit
+        end
+        a = math.floor(a / 2)
+        b = math.floor(b / 2)
+        bit = bit * 2
+    end
+    return result
+end
+
+---32-bit bitwise NOT. Only valid for values that fit in 32 bits
+---(IPv4 addresses and netmasks), which is all this codebase uses.
+---@param v number
+---@return number
+function util.bitNot(v)
+    return 0xFFFFFFFF - v
+end
+
 return util
