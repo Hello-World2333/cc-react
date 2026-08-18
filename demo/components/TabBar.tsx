@@ -56,6 +56,9 @@ export function TabBar({
         <TabButton id="scroll" label="Scroll" active={active === 'scroll'} onSelect={onSelect} />
         <TabButton id="network" label="Network" active={active === 'network'} onSelect={onSelect} />
       </Box>
+      <Box style={{ flexDirection: 'row', justifyContent: 'flex-start' }}>
+        <TabButton id="control" label="Control" active={active === 'control'} onSelect={onSelect} />
+      </Box>
     </Box>
   );
 }

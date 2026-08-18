@@ -180,6 +180,8 @@ declare global {
   var Scroll: (props: ScrollProps) => JSX.Element;
   var Input: (props: InputProps) => JSX.Element;
   var Switch: (props: SwitchProps) => JSX.Element;
+  var ProgressBar: (props: ProgressBarProps) => JSX.Element;
+  var Slider: (props: SliderProps) => JSX.Element;
 
   // ----- JSX namespace -----
 
@@ -276,6 +278,35 @@ declare global {
       disabled?: boolean;
     }
 
+    interface ProgressBarProps {
+      style?: Style;
+      /** Progress value (0 to 1). */
+      value?: number;
+      /** Fill color (accent). */
+      color?: string;
+      /** Track background color. */
+      backgroundColor?: string;
+    }
+
+    interface SliderProps {
+      style?: Style;
+      /** Current value. */
+      value?: number;
+      /** Minimum value (default 0). */
+      min?: number;
+      /** Maximum value (default 1). */
+      max?: number;
+      /** Step increment (default 0.01). */
+      step?: number;
+      /** Called with the new value on change. */
+      onChange?: (value: number) => void;
+      /** Accent color (thumb + filled track). */
+      color?: string;
+      /** Track background color. */
+      backgroundColor?: string;
+      disabled?: boolean;
+    }
+
     interface IntrinsicElements {
       box: BoxProps;
       Box: BoxProps;
@@ -291,6 +322,10 @@ declare global {
       Input: InputProps;
       switch: SwitchProps;
       Switch: SwitchProps;
+      progressbar: ProgressBarProps;
+      ProgressBar: ProgressBarProps;
+      slider: SliderProps;
+      Slider: SliderProps;
     }
   }
 }
@@ -307,4 +342,6 @@ export type ButtonProps = globalThis.JSX.ButtonProps;
 export type ScrollProps = globalThis.JSX.ScrollProps;
 export type InputProps = globalThis.JSX.InputProps;
 export type SwitchProps = globalThis.JSX.SwitchProps;
+export type ProgressBarProps = globalThis.JSX.ProgressBarProps;
+export type SliderProps = globalThis.JSX.SliderProps;
 export type { FetchOptions, FetchResponse, FetchRequestState };

@@ -74,7 +74,7 @@ render(<App />);
 ## 支持范围（MVP）
 
 - **组件**：`Box` / `Panel` / `Text` / `Button` / `Scroll`（滚动容器，也接受小写 `scroll` 等）/
-  `Input`（文本框，里程碑 1）/ `Switch`（开关切换）
+  `Input`（文本框，里程碑 1）/ `Switch`（开关切换）/ `ProgressBar`（进度条）/ `Slider`（滑动条）
 - **hooks**：`useState`（含函数式更新）、`useEffect`（依赖数组比对）
 - **布局**：flexbox 子集 —— `flexDirection`（默认 column）、`justifyContent`、`alignItems`（含 stretch）、
   `gap`、`margin` / `padding`（数值或四边对象，支持 `marginTop` 等单边）、固定尺寸 / 内容尺寸 / `width: '100%'`
@@ -137,6 +137,84 @@ function Settings() {
         <Text>通知</Text>
         <Switch value={notifications} onChange={setNotifications} />
       </Box>
+    </Panel>
+  );
+}
+```
+
+## ProgressBar（进度条）
+
+`<ProgressBar>` 是一个只读显示组件，用于表示 0 到 1 之间的进度值。
+
+### Props
+
+| 属性 | 类型 | 说明 |
+|---|---|---|
+| `value` | `number` | 进度值（0 到 1），超出范围会被钳制 |
+| `color` | `string` | 填充颜色（默认 `#7ec8ff` 强调色） |
+| `backgroundColor` | `string` | 轨道背景颜色（默认 `#2a2a35`） |
+| `style` | `Style` | 样式（可自定义尺寸等） |
+
+### 默认尺寸
+
+进度条默认为 **100×9 像素**。可通过 `style.width` / `style.height` 自定义。
+
+### 使用示例
+
+```tsx
+function ProgressDemo() {
+  const [progress, setProgress] = useState(0.3);
+
+  return (
+    <Panel style={{ flexDirection: 'column', gap: 8, padding: 8 }}>
+      <Text>进度: {Math.round(progress * 100)}%</Text>
+      <ProgressBar value={progress} style={{ width: 150 }} />
+      <Slider value={progress} onChange={setProgress} style={{ width: 150 }} />
+    </Panel>
+  );
+}
+```
+
+## Slider（滑动条）
+
+`<Slider>` 是一个可交互的滑动条控件，用户可以通过点击或拖拽来设置数值。
+
+### Props
+
+| 属性 | 类型 | 说明 |
+|---|---|---|
+| `value` | `number` | 当前值 |
+| `min` | `number` | 最小值（默认 0） |
+| `max` | `number` | 最大值（默认 1） |
+| `step` | `number` | 步进值（默认 0.01） |
+| `onChange` | `(value: number) => void` | 值变化时回调 |
+| `color` | `string` | 强调色（滑块 + 填充轨道颜色，默认 `#7ec8ff`） |
+| `backgroundColor` | `string` | 轨道背景颜色（默认 `#2a2a35`） |
+| `disabled` | `boolean` | 禁用时不可交互，显示灰色外观 |
+| `style` | `Style` | 样式（可自定义尺寸等） |
+
+### 默认尺寸
+
+滑动条默认宽度填满父容器，高度为 **9 像素**。可通过 `style.width` / `style.height` 自定义。
+
+### 使用示例
+
+```tsx
+function VolumeControl() {
+  const [volume, setVolume] = useState(0.7);
+
+  return (
+    <Panel style={{ flexDirection: 'column', gap: 8, padding: 8 }}>
+      <Text>音量: {Math.round(volume * 100)}%</Text>
+      <Slider
+        value={volume}
+        onChange={setVolume}
+        min={0}
+        max={1}
+        step={0.05}
+        style={{ width: 150 }}
+        color="#00c853"
+      />
     </Panel>
   );
 }

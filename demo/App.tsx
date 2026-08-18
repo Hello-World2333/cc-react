@@ -37,6 +37,7 @@ import { CounterTab } from './components/CounterTab';
 import { InputTab } from './components/InputTab';
 import { ScrollTab } from './components/ScrollTab';
 import { NetworkTab } from './components/NetworkTab';
+import { ControlTab } from './components/ControlTab';
 import { BG } from './lib/theme';
 
 function App() {
@@ -54,15 +55,16 @@ function App() {
     >
       <TabBar active={tab} onSelect={setTab} />
 
-      {/* The tab bar is 50px tall (2 rows); the content box fills the rest of
-          a 3x4 monitor stack (192x256): 256 - 16 padding - 50 = 190. */}
-      <Box style={{ width: '100%', height: 190, flexDirection: 'column' }}>
+      {/* The tab bar is ~68px tall (3 rows); the content box fills the rest of
+          a 3x4 monitor stack (192x256): 256 - 16 padding - 68 = 172. */}
+      <Box style={{ width: '100%', height: 172, flexDirection: 'column' }}>
         {tab === 'home' && <HomeTab />}
         {tab === 'layout' && <LayoutTab />}
         {tab === 'counter' && <CounterTab />}
         {tab === 'input' && <InputTab />}
         {tab === 'scroll' && <ScrollTab />}
         {tab === 'network' && <NetworkTab />}
+        {tab === 'control' && <ControlTab />}
       </Box>
     </Panel>
   );

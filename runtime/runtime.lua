@@ -576,6 +576,21 @@ local function __switch(props)
   return node
 end
 
+-- Slider: a draggable leaf that lets the user set a numeric value between
+-- min and max. Props: value, min, max, step, onChange, color, backgroundColor.
+-- Fixed default height: 9 px; width fills the parent.
+-- Clicking the track jumps to that position; drag adjusts continuously.
+-- The thumb is a 5×9 knob centered on the current value position.
+local function __slider(props)
+  return __makeNode("slider", props, {
+    backgroundColor = 0xFF2A2A35,   -- track background
+    color = 0xFF7EC8FF,             -- accent: filled track + thumb
+    borderColor = 0xFF4A4A5A,
+    pressedColor = 0xFF3A3A48,
+    padding = 0,
+  })
+end
+
 -- Normalize JSX children into a flat array of nodes.
 -- - nil / false / true are dropped
 -- - nested arrays are flattened
@@ -1315,6 +1330,14 @@ local function __measure(node, maxW, maxH)
     -- Toggle switch: fixed 16×9 default size, overridable via style.
     cw = __resolveSize(s.width, 16, maxW)
     ch = __resolveSize(s.height, 9, maxH)
+  elseif kind == "progressbar" then
+    -- Progress bar: default 100×9, overridable via style.
+    cw = __resolveSize(s.width, 100, maxW)
+    ch = __resolveSize(s.height, 9, maxH)
+  elseif kind == "slider" then
+    -- Slider: fills parent width by default, fixed 9px height.
+    cw = __resolveSize(s.width, maxW, maxW)
+    ch = __resolveSize(s.height, 9, maxH)
   else
     local dir = s.flexDirection or "column"
     local gap = s.gap or 0
@@ -1836,6 +1859,60 @@ local function __drawNode(node, clip)
       knobColor = 0xFFAAAAAA  -- gray knob on dark track
     end
     __gpu.filledRectangle(knobX, knobY, knobSize, knobSize, knobColor, clip)
+  elseif node.kind == "progressbar" then
+    -- Progress bar: track background + filled portion proportional to value.
+    local isDisabled = disabled
+    local trackColor = isDisabled and 0xFF1A1A22 or (fill or 0xFF2A2A35)
+    __gpu.filledRectangle(node.x, node.y, w, h, trackColor, clip)
+    if s.borderColor then
+      local bc = isDisabled and 0xFF333340 or s.borderColor
+      __gpu.rectangle(node.x, node.y, w, h, bc, clip)
+    end
+    -- filled portion
+    local val = node.value or 0
+    if val < 0 then val = 0 elseif val > 1 then val = 1 end
+    local fillW = math.floor(w * val + 0.5)
+    if fillW > 0 then
+      local fillColor = isDisabled and 0xFF5A5A68 or (s.color or 0xFF7EC8FF)
+      __gpu.filledRectangle(node.x, node.y, fillW, h, fillColor, clip)
+    end
+  elseif node.kind == "slider" then
+    -- Slider: track + filled portion + draggable thumb.
+    local isDisabled = disabled
+    local trackColor = isDisabled and 0xFF1A1A22 or (fill or 0xFF2A2A35)
+    __gpu.filledRectangle(node.x, node.y, w, h, trackColor, clip)
+    if s.borderColor then
+      local bc = isDisabled and 0xFF333340 or s.borderColor
+      __gpu.rectangle(node.x, node.y, w, h, bc, clip)
+    end
+    -- filled portion (from left edge to thumb center)
+    local vmin = s.min or 0
+    local vmax = s.max or 1
+    local val = node.value or vmin
+    if val < vmin then val = vmin elseif val > vmax then val = vmax end
+    local range = vmax - vmin
+    local ratio = range ~= 0 and (val - vmin) / range or 0
+    local thumbW = 5
+    local trackInner = math.max(0, w - thumbW)
+    local thumbCx = math.floor(node.x + thumbW / 2 + ratio * trackInner + 0.5)
+    local fillEnd = thumbCx
+    if fillEnd > node.x + w then fillEnd = node.x + w end
+    local fillW = fillEnd - node.x
+    if fillW > 0 then
+      local fillColor = isDisabled and 0xFF5A5A68 or (s.color or 0xFF7EC8FF)
+      __gpu.filledRectangle(node.x, node.y, fillW, h, fillColor, clip)
+    end
+    -- thumb (5px wide, full height)
+    local thumbX = thumbCx - math.floor(thumbW / 2)
+    local thumbColor
+    if isDisabled then
+      thumbColor = 0xFF5A5A68
+    elseif node.pressed then
+      thumbColor = s.pressedColor or s.color or 0xFF7EC8FF
+    else
+      thumbColor = 0xFFFFFFFF
+    end
+    __gpu.filledRectangle(thumbX, node.y, thumbW, h, thumbColor, clip)
   end
   local children = node.children
   if node.kind == "scroll" then
@@ -1969,8 +2046,8 @@ end
 
 -- How far a pointer may move before a press counts as a drag instead of a tap
 -- (suppresses the click that would otherwise fire on mouse_up).
-local DRAG_TAP_SLOP = 4
-local __scrollDrag = nil -- { path, x, y, moved, total } — active touch drag on a scroll
+
+local __scrollDrag = nil -- { kind="scroll", path, x, y, moved, total } or { kind="slider", path }
 
 local function __scrollBy(sc, dx, dy)
   local st = __scrollState[sc.path]
@@ -1990,19 +2067,44 @@ local function __scrollBy(sc, dx, dy)
   end
 end
 
--- CC peripheral events carry the attachment name as the first payload arg.
-local function __eventArgs(e)
-  if type(e[2]) == "string" then return 3 end
-  return 2
-end
-
 local function __handleEvent(e)
+  -- CC peripheral events carry the attachment name as the first payload arg.
+  local function __eventArgs(e)
+    if type(e[2]) == "string" then return 3 end
+    return 2
+  end
+  -- Compute a slider value from a pointer X position. Returns the clamped,
+  -- step-quantized value within [min, max].
+  local function sliderVal(node, x)
+    local s = node.style
+    local vmin = s.min or 0
+    local vmax = s.max or 1
+    local vstep = s.step or 0.01
+    local thumbW = 5
+    local trackInner = math.max(0, node.w - thumbW)
+    if trackInner <= 0 then return vmin end
+    local ratio = (x - node.x - thumbW / 2) / trackInner
+    if ratio < 0 then ratio = 0 elseif ratio > 1 then ratio = 1 end
+    local raw = vmin + ratio * (vmax - vmin)
+    if vstep > 0 then
+      raw = math.floor((raw - vmin) / vstep + 0.5) * vstep + vmin
+    end
+    if raw < vmin then raw = vmin elseif raw > vmax then raw = vmax end
+    return raw
+  end
   local name = e[1]
   if name == "tm_monitor_touch" then
     local i = __eventArgs(e)
     local x, y = e[i], e[i + 1]
     if type(x) == "number" and type(y) == "number" then
       local hit = __hitTest(x, y)
+      -- Slider tap: jump to the tapped position
+      if hit and hit.kind == "slider" and not hit.disabled then
+        local newVal = sliderVal(hit, x)
+        if hit.onChange and newVal ~= hit.value then
+          hit.onChange(newVal)
+        end
+      end
       -- focus management: tapping an input focuses it (cursor at the tap
       -- position), any other tap blurs; disabled nodes are never focusable
       if hit and __isFocusable(hit) then
@@ -2025,6 +2127,14 @@ local function __handleEvent(e)
       else
         __blur()
       end
+      -- Slider: start drag + immediate value update on click
+      if hit and hit.kind == "slider" and not hit.disabled then
+        local newVal = sliderVal(hit, x)
+        if hit.onChange and newVal ~= hit.value then
+          hit.onChange(newVal)
+        end
+        __scrollDrag = { kind = "slider", path = hit.path }
+      end
       local h = __findHandler(hit, "onClick")
       if h and not h.disabled then
         __pressedPath = h.path
@@ -2033,13 +2143,33 @@ local function __handleEvent(e)
       -- a press over a scroll container starts a potential touch drag
       local sc = __findScrollAncestor(hit)
       if sc and not sc.disabled then
-        __scrollDrag = { path = sc.path, x = x, y = y, moved = false }
+        __scrollDrag = { kind = "scroll", path = sc.path, x = x, y = y, moved = false }
       end
     end
   elseif name == "tm_monitor_mouse_drag" then
     local i = __eventArgs(e)
     local x, y, btn = e[i], e[i + 1], e[i + 2]
-    if __scrollDrag and type(x) == "number" and type(y) == "number"
+    if __scrollDrag and __scrollDrag.kind == "slider" and type(x) == "number" then
+      -- Find the slider node in the tree and update its value
+      local function findSlider(node)
+        if node.path == __scrollDrag.path then return node end
+        for j = 1, #node.children do
+          local r = findSlider(node.children[j])
+          if r then return r end
+        end
+        return nil
+      end
+      if __lastTree then
+        local snode = findSlider(__lastTree)
+        if snode and not snode.disabled then
+          local newVal = sliderVal(snode, x)
+          if snode.onChange and newVal ~= snode.value then
+            snode.onChange(newVal)
+          end
+        end
+      end
+    end
+    if __scrollDrag and __scrollDrag.kind == "scroll" and type(x) == "number" and type(y) == "number"
        and (btn == nil or btn == 1) then
       local sc = __scrollState[__scrollDrag.path]
       if sc then
@@ -2048,7 +2178,7 @@ local function __handleEvent(e)
         if dx ~= 0 or dy ~= 0 then
           -- accumulate total travel: several small moves still count as a drag
           __scrollDrag.total = (__scrollDrag.total or 0) + math.abs(dx) + math.abs(dy)
-          if __scrollDrag.total > DRAG_TAP_SLOP then __scrollDrag.moved = true end
+          if __scrollDrag.total > 4 then __scrollDrag.moved = true end
           -- content follows the finger: scrollBy(-delta)
           __scrollBy({ path = __scrollDrag.path }, -dx, -dy)
           __scrollDrag.x, __scrollDrag.y = x, y
@@ -2060,6 +2190,7 @@ local function __handleEvent(e)
     local x, y, btn = e[i], e[i + 1], e[i + 2]
     if type(x) == "number" and type(y) == "number"
        and (btn == nil or btn == 1) then
+      __scrollDrag = nil
       -- a drag that actually moved cancels the tap's click
       local wasDrag = __scrollDrag ~= nil and __scrollDrag.moved
       __scrollDrag = nil

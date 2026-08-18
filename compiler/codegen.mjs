@@ -25,6 +25,15 @@ const HOST_FACTORIES = new Map([
   ['scroll', '__scroll'], ['Scroll', '__scroll'],
   ['input', '__input'], ['Input', '__input'],
   ['switch', '__switch'], ['Switch', '__switch'],
+  ['slider', '__slider'], ['Slider', '__slider'],
+]);
+
+// Simple leaf components that are just __makeNode calls with default style
+// (no custom init logic). Emits __makeNode(kind, props, defaults) directly
+// to avoid extra top-level local functions.
+const HOST_LEAVES = new Map([
+  ['progressbar', { kind: 'progressbar', defaults: { backgroundColor: 0xFF2A2A35, color: 0xFF7EC8FF, padding: 0 } }],
+  ['ProgressBar', { kind: 'progressbar', defaults: { backgroundColor: 0xFF2A2A35, color: 0xFF7EC8FF, padding: 0 } }],
 ]);
 
 export class CodegenError extends Error {}
@@ -942,9 +951,15 @@ export class Codegen {
     if (factory) {
       return `${factory}(${this.genJsxProps(node)})`;
     }
+    const leaf = HOST_LEAVES.get(tag);
+    if (leaf) {
+      const d = leaf.defaults;
+      const defaultsLua = `{ backgroundColor = ${d.backgroundColor}, color = ${d.color}, padding = ${d.padding} }`;
+      return `__makeNode("${leaf.kind}", ${this.genJsxProps(node)}, ${defaultsLua})`;
+    }
     if (/^[a-z]/.test(tag)) {
       throw new CodegenError(
-        `unknown intrinsic element <${tag}/> (known: Box/Panel/Text/Button/Scroll/Input/Switch)`);
+        `unknown intrinsic element <${tag}/> (known: Box/Panel/Text/Button/Scroll/Input/Switch/ProgressBar/Slider)`);
     }
     if (!this.components.has(tag)) {
       throw new CodegenError(`<${tag}/> is used but no component function '${tag}' is defined`);
