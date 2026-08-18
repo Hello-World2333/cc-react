@@ -1,6 +1,6 @@
 {
   "name": "@linyun-host/cc-react",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "React-style UI framework for CC: Tweaked + Tom's Peripherals GPU. The cc-react CLI compiles a .tsx app into a single Lua module whose start(side) runs as a simpleParallel task.",
   "type": "module",
   "bin": {
