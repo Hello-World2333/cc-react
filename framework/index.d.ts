@@ -222,6 +222,7 @@ declare global {
       onClick?: () => void;
       onMouseDown?: () => void;
       onMouseUp?: () => void;
+      disabled?: boolean;
     }
 
     interface TextProps {
@@ -236,6 +237,7 @@ declare global {
       onClick?: () => void;
       onMouseDown?: () => void;
       onMouseUp?: () => void;
+      disabled?: boolean;
     }
 
     interface ScrollProps {
@@ -244,6 +246,7 @@ declare global {
       onClick?: () => void;
       onMouseDown?: () => void;
       onMouseUp?: () => void;
+      disabled?: boolean;
     }
 
     /**
@@ -260,6 +263,7 @@ declare global {
       onChange?: (value: string) => void;
       onSubmit?: () => void;
       onKey?: (key: number, isUp: boolean) => void;
+      disabled?: boolean;
     }
 
     interface IntrinsicElements {

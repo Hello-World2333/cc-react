@@ -486,6 +486,7 @@ local function __makeNode(kind, props, defaults)
     onClick = props.onClick,
     onMouseDown = props.onMouseDown,
     onMouseUp = props.onMouseUp,
+    disabled = props.disabled,
     children = props.children or {},
     parent = nil,
     path = nil,
@@ -733,7 +734,7 @@ local CURSOR_W = 2
 
 -- Focusable nodes: only Input in the MVP (extend with Buttons later).
 local function __isFocusable(node)
-  return node.kind == "input"
+  return node.kind == "input" and not node.disabled
 end
 
 local function __inputStateFor(path)
@@ -847,6 +848,7 @@ end
 -- the press landed on (nearest char boundary of the value text, accounting
 -- for the horizontal scroll offset).
 local function __focusInputAt(node, x)
+  if node.disabled then return end
   local path = node.path
   if __focusedPath ~= path then
     if __focusedPath then __cancelBlink(__focusedPath) end
@@ -1555,6 +1557,7 @@ local function __sameNode(a, b)
   if a.placeholder ~= b.placeholder then return false end
   if a.pressed ~= b.pressed then return false end
   if a.focused ~= b.focused then return false end
+  if a.disabled ~= b.disabled then return false end
   if a.cursor ~= b.cursor then return false end
   if a.cursorVisible ~= b.cursorVisible then return false end
   if a.x ~= b.x or a.y ~= b.y or a.w ~= b.w or a.h ~= b.h then return false end
@@ -1700,14 +1703,23 @@ local function __drawNode(node, clip)
   local s = node.style
   local w, h = node.w, node.h
   if w <= 0 or h <= 0 then return end
+  local disabled = node.disabled == true
   local fill = s.backgroundColor
-  if node.kind == "button" and node.pressed and s.pressedColor then
-    fill = s.pressedColor
+  if node.kind == "button" then
+    if disabled then
+      fill = 0xFF1A1A22
+    elseif node.pressed and s.pressedColor then
+      fill = s.pressedColor
+    end
+  elseif node.kind == "input" and disabled then
+    fill = 0xFF1A1A22
   end
   if fill then __gpu.filledRectangle(node.x, node.y, w, h, fill, clip) end
   if s.borderColor then
     local bc = s.borderColor
-    if node.kind == "input" and node.focused and s.focusBorderColor then
+    if disabled then
+      bc = 0xFF333340
+    elseif node.kind == "input" and node.focused and s.focusBorderColor then
       bc = s.focusBorderColor -- focus ring
     end
     __gpu.rectangle(node.x, node.y, w, h, bc, clip)
@@ -1726,7 +1738,8 @@ local function __drawNode(node, clip)
     local th = __fontH * fs
     local tx = math.floor(node.x + (w - tw) / 2 + 0.5)
     local ty = math.floor(node.y + (h - th) / 2 + 0.5)
-    __gpu.drawText(tx, ty, label, s.color or COLOR_TEXT, fill, fs, tp, clip)
+    local textColor = disabled and 0xFF5A5A68 or (s.color or COLOR_TEXT)
+    __gpu.drawText(tx, ty, label, textColor, fill, fs, tp, clip)
   elseif node.kind == "input" then
     local fs = s.fontSize or 1
     local tp = s.textPadding or 1
@@ -1738,17 +1751,24 @@ local function __drawNode(node, clip)
     local iclip = __clipIntersect(clip, node.x + s.paddingL, node.y + s.paddingT, contentW, contentH)
     local off = node.inputOffset or 0
     local show, color = val, s.color or COLOR_TEXT
+    if disabled then
+      color = 0xFF5A5A68
+    end
     if #show == 0 then
       show = node.placeholder or ""
-      color = s.placeholderColor or (s.color or COLOR_TEXT)
+      if disabled then
+        color = 0xFF5A5A68
+      else
+        color = s.placeholderColor or (s.color or COLOR_TEXT)
+      end
       off = 0 -- the placeholder is pinned to the left edge
     end
     local eshow = __enc(show)
     if #eshow > 0 then
       __gpu.drawText(node.x + s.paddingL - off, node.y + s.paddingT, eshow, color, s.textBackgroundColor, fs, tp, iclip)
     end
-    -- blinking insertion-point cursor (2px bar, full glyph height)
-    if node.focused and node.cursorVisible then
+    -- blinking insertion-point cursor (2px bar, full glyph height) — hidden when disabled
+    if node.focused and node.cursorVisible and not disabled then
       local eval = __enc(val)
       local ecur = __encCursor(val, node.cursor)
       local cw = __gpu.getTextLength(eval:sub(1, ecur), fs, tp)
@@ -1923,14 +1943,14 @@ local function __handleEvent(e)
     if type(x) == "number" and type(y) == "number" then
       local hit = __hitTest(x, y)
       -- focus management: tapping an input focuses it (cursor at the tap
-      -- position), any other tap blurs
+      -- position), any other tap blurs; disabled nodes are never focusable
       if hit and __isFocusable(hit) then
         __focusInputAt(hit, x)
       else
         __blur()
       end
       local h = __findHandler(hit, "onClick")
-      if h and h.onClick then
+      if h and h.onClick and not h.disabled then
         h.onClick()
       end
     end
@@ -1945,13 +1965,13 @@ local function __handleEvent(e)
         __blur()
       end
       local h = __findHandler(hit, "onClick")
-      if h then
+      if h and not h.disabled then
         __pressedPath = h.path
         __scheduleRender() -- repaint the pressed visual
       end
       -- a press over a scroll container starts a potential touch drag
       local sc = __findScrollAncestor(hit)
-      if sc then
+      if sc and not sc.disabled then
         __scrollDrag = { path = sc.path, x = x, y = y, moved = false }
       end
     end
@@ -1985,7 +2005,7 @@ local function __handleEvent(e)
       if __pressedPath then
         if not wasDrag then
           local h = __findHandler(__hitTest(x, y), "onClick")
-          if h and h.path == __pressedPath and h.onClick then
+          if h and h.path == __pressedPath and h.onClick and not h.disabled then
             h.onClick()
           end
         end
@@ -1999,7 +2019,7 @@ local function __handleEvent(e)
     if type(x) == "number" and type(y) == "number"
        and type(dir) == "number" and dir ~= 0 then
       local sc = __findScrollAncestor(__hitTest(x, y))
-      if sc then
+      if sc and not sc.disabled then
         -- Real-device convention (verified in source): Minecraft wheel delta
         -- < 0 (wheel down) maps to dir = +1, wheel up to dir = -1 — so a
         -- positive dir scrolls the content down (scrollY increases).

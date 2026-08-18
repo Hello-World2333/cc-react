@@ -89,3 +89,7 @@ render(<App />);
   同名组件自动改名、跨文件 hooks/props/常量均可用；编译产物是模块，
   `start(side)` 作为 simpleParallel 任务被主程序调度（见 [deployment.md](deployment.md)）
 - **网络**（里程碑 3）：见 [network.md](network.md)
+- **禁用态**：`Button` / `Input` / `Scroll` / `Box`（带 `onClick`）均支持 `disabled` 属性。
+  设为 `true` 时：交互事件被阻止（点击/键盘输入/滚动），
+  控件显示为灰色外观（`Button` 背景变暗、文字变灰；`Input` 背景/边框/文字变灰且隐藏光标）。
+  焦点不会落在禁用的 `Input` 上，Tab 切换也会跳过它们。

@@ -50,6 +50,7 @@ export namespace JSX {
     onClick?: () => void;
     onMouseDown?: () => void;
     onMouseUp?: () => void;
+    disabled?: boolean;
   }
 
   interface TextProps {
@@ -64,6 +65,7 @@ export namespace JSX {
     onClick?: () => void;
     onMouseDown?: () => void;
     onMouseUp?: () => void;
+    disabled?: boolean;
   }
 
   interface ScrollProps {
@@ -72,6 +74,7 @@ export namespace JSX {
     onClick?: () => void;
     onMouseDown?: () => void;
     onMouseUp?: () => void;
+    disabled?: boolean;
   }
 
   interface InputProps {
@@ -81,6 +84,7 @@ export namespace JSX {
     onChange?: (value: string) => void;
     onSubmit?: () => void;
     onKey?: (key: number, isUp: boolean) => void;
+    disabled?: boolean;
   }
 
   interface IntrinsicElements {
