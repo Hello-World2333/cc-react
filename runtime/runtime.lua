@@ -497,6 +497,10 @@ local function __makeNode(kind, props, defaults)
     x = 0, y = 0, w = 0, h = 0,
     -- scroll viewport: content size + current offset (set during layout)
     scrollX = 0, scrollY = 0, contentW = 0, contentH = 0,
+    -- slider props (min/max/step are component props, not style)
+    min = props.min,
+    max = props.max,
+    step = props.step,
   }
   return node
 end
@@ -1886,8 +1890,8 @@ local function __drawNode(node, clip)
       __gpu.rectangle(node.x, node.y, w, h, bc, clip)
     end
     -- filled portion (from left edge to thumb center)
-    local vmin = s.min or 0
-    local vmax = s.max or 1
+    local vmin = node.min or 0
+    local vmax = node.max or 1
     local val = node.value or vmin
     if val < vmin then val = vmin elseif val > vmax then val = vmax end
     local range = vmax - vmin
@@ -2076,10 +2080,9 @@ local function __handleEvent(e)
   -- Compute a slider value from a pointer X position. Returns the clamped,
   -- step-quantized value within [min, max].
   local function sliderVal(node, x)
-    local s = node.style
-    local vmin = s.min or 0
-    local vmax = s.max or 1
-    local vstep = s.step or 0.01
+    local vmin = node.min or 0
+    local vmax = node.max or 1
+    local vstep = node.step or 0.01
     local thumbW = 5
     local trackInner = math.max(0, node.w - thumbW)
     if trackInner <= 0 then return vmin end

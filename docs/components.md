@@ -163,13 +163,19 @@ function Settings() {
 
 ```tsx
 function ProgressDemo() {
-  const [progress, setProgress] = useState(0.3);
+  const [progress, setProgress] = useState(30);
 
   return (
     <Panel style={{ flexDirection: 'column', gap: 8, padding: 8 }}>
-      <Text>进度: {Math.round(progress * 100)}%</Text>
-      <ProgressBar value={progress} style={{ width: 150 }} />
-      <Slider value={progress} onChange={setProgress} style={{ width: 150 }} />
+      <Text>进度: {progress}%</Text>
+      <ProgressBar value={progress / 100} style={{ width: 150 }} />
+      <Slider
+        value={progress}
+        min={0}
+        max={100}
+        onChange={setProgress}
+        style={{ width: 150 }}
+      />
     </Panel>
   );
 }
