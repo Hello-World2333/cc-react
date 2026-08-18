@@ -71,7 +71,6 @@ local FONT_W = 5
 -- Font height becomes 16 when the Chinese custom font is active
 -- (__fontInit sets it; see the "Chinese font support" section below).
 local __fontH = 8
-local FULL_REPAINT_RATIO = 0.4
 -- Extra margin added to every dirty rect: covers glyphs that draw a pixel or
 -- two beyond their measured box (sub-pixel centering, font metric rounding).
 local DIRTY_PAD = 2
@@ -554,6 +553,27 @@ end
 -- (default 8 = one 5x8 text row), flexDirection = scroll axis (column default).
 local function __scroll(props)
   return __makeNode("scroll", props, {})
+end
+
+-- Toggle switch: a clickable on/off leaf. Renders a track with a sliding knob
+-- (ON = accent color, OFF = gray). Props: value (boolean), onChange (callback).
+-- Fixed default size: 16×9 px; override via style width/height.
+local function __switch(props)
+  local node = __makeNode("switch", props, {
+    backgroundColor = 0xFF3A3A48,   -- track off background
+    color = 0xFF7EC8FF,             -- accent: track on + knob on
+    borderColor = 0xFF4A4A5A,
+    pressedColor = 0xFF3A3A48,
+    padding = 0,
+  })
+  -- Wire up onClick to toggle: reads current value from the node (always
+  -- fresh after re-render) and calls onChange with the negated boolean.
+  node.onClick = function()
+    if not node.disabled and node.onChange then
+      node.onChange(not node.value)
+    end
+  end
+  return node
 end
 
 -- Normalize JSX children into a flat array of nodes.
@@ -1291,6 +1311,10 @@ local function __measure(node, maxW, maxH)
     -- the scroll axis during __layoutScroll.
     cw = __resolveSize(s.width, maxW, maxW)
     ch = __resolveSize(s.height, maxH, maxH)
+  elseif kind == "switch" then
+    -- Toggle switch: fixed 16×9 default size, overridable via style.
+    cw = __resolveSize(s.width, 16, maxW)
+    ch = __resolveSize(s.height, 9, maxH)
   else
     local dir = s.flexDirection or "column"
     local gap = s.gap or 0
@@ -1775,6 +1799,43 @@ local function __drawNode(node, clip)
       local cx = node.x + s.paddingL + cw - off
       __gpu.filledRectangle(cx, node.y + s.paddingT, 2, __fontH * fs, s.cursorColor or COLOR_TEXT, iclip)
     end
+  elseif node.kind == "switch" then
+    -- Toggle switch: track (full node) + sliding knob.
+    -- ON  = accent fill + knob on right;  OFF = dark fill + knob on left.
+    local isOn = node.value == true
+    local trackColor
+    if disabled then
+      trackColor = 0xFF1A1A22
+    elseif isOn then
+      trackColor = s.color or 0xFF7EC8FF  -- accent (on)
+    else
+      trackColor = fill or 0xFF3A3A48      -- off
+    end
+    -- Draw track background
+    __gpu.filledRectangle(node.x, node.y, w, h, trackColor, clip)
+    if s.borderColor then
+      local bc = disabled and 0xFF333340 or s.borderColor
+      __gpu.rectangle(node.x, node.y, w, h, bc, clip)
+    end
+    -- Knob: 7×7 centered vertically, horizontal position depends on on/off.
+    -- Padding of 1px around the knob inside the track.
+    local knobSize = 7
+    local knobY = node.y + math.floor((h - knobSize) / 2)
+    local knobX
+    if isOn then
+      knobX = node.x + w - knobSize - 1  -- right side
+    else
+      knobX = node.x + 1                  -- left side
+    end
+    local knobColor
+    if disabled then
+      knobColor = 0xFF5A5A68
+    elseif isOn then
+      knobColor = 0xFFFFFFFF  -- white knob on accent track
+    else
+      knobColor = 0xFFAAAAAA  -- gray knob on dark track
+    end
+    __gpu.filledRectangle(knobX, knobY, knobSize, knobSize, knobColor, clip)
   end
   local children = node.children
   if node.kind == "scroll" then
@@ -1856,7 +1917,7 @@ local function __render()
   __lastTree = tree
 
   local merged, area = __mergeRects(rects, __viewportW, __viewportH)
-  if area > __viewportW * __viewportH * FULL_REPAINT_RATIO then
+  if area > __viewportW * __viewportH * 0.4 then
     __drawFull(tree)
   else
     __drawDirty(tree, merged)

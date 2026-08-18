@@ -179,6 +179,7 @@ declare global {
   var Button: (props: ButtonProps) => JSX.Element;
   var Scroll: (props: ScrollProps) => JSX.Element;
   var Input: (props: InputProps) => JSX.Element;
+  var Switch: (props: SwitchProps) => JSX.Element;
 
   // ----- JSX namespace -----
 
@@ -266,6 +267,15 @@ declare global {
       disabled?: boolean;
     }
 
+    interface SwitchProps {
+      style?: Style;
+      /** Current toggle state. */
+      value?: boolean;
+      /** Called when toggled with the new boolean value. */
+      onChange?: (value: boolean) => void;
+      disabled?: boolean;
+    }
+
     interface IntrinsicElements {
       box: BoxProps;
       Box: BoxProps;
@@ -279,6 +289,8 @@ declare global {
       Scroll: ScrollProps;
       input: InputProps;
       Input: InputProps;
+      switch: SwitchProps;
+      Switch: SwitchProps;
     }
   }
 }
@@ -294,4 +306,5 @@ export type TextProps = globalThis.JSX.TextProps;
 export type ButtonProps = globalThis.JSX.ButtonProps;
 export type ScrollProps = globalThis.JSX.ScrollProps;
 export type InputProps = globalThis.JSX.InputProps;
+export type SwitchProps = globalThis.JSX.SwitchProps;
 export type { FetchOptions, FetchResponse, FetchRequestState };

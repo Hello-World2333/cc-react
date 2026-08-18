@@ -74,7 +74,7 @@ render(<App />);
 ## 支持范围（MVP）
 
 - **组件**：`Box` / `Panel` / `Text` / `Button` / `Scroll`（滚动容器，也接受小写 `scroll` 等）/
-  `Input`（文本框，里程碑 1）
+  `Input`（文本框，里程碑 1）/ `Switch`（开关切换）
 - **hooks**：`useState`（含函数式更新）、`useEffect`（依赖数组比对）
 - **布局**：flexbox 子集 —— `flexDirection`（默认 column）、`justifyContent`、`alignItems`（含 stretch）、
   `gap`、`margin` / `padding`（数值或四边对象，支持 `marginTop` 等单边）、固定尺寸 / 内容尺寸 / `width: '100%'`
@@ -93,3 +93,51 @@ render(<App />);
   设为 `true` 时：交互事件被阻止（点击/键盘输入/滚动），
   控件显示为灰色外观（`Button` 背景变暗、文字变灰；`Input` 背景/边框/文字变灰且隐藏光标）。
   焦点不会落在禁用的 `Input` 上，Tab 切换也会跳过它们。
+
+## Switch（开关切换）
+
+`<Switch>` 是一个布尔开关控件，点击可切换开/关状态。
+
+### Props
+
+| 属性 | 类型 | 说明 |
+|---|---|---|
+| `value` | `boolean` | 当前开关状态（`true` = 开，`false` = 关） |
+| `onChange` | `(value: boolean) => void` | 切换时回调，参数为新状态 |
+| `disabled` | `boolean` | 禁用时不可交互，显示灰色外观 |
+| `style` | `Style` | 样式（可自定义尺寸、颜色等） |
+
+### 样式颜色
+
+| 样式属性 | 默认值 | 说明 |
+|---|---|---|
+| `color` | `#7ec8ff` | 开关打开时的轨道颜色（强调色） |
+| `backgroundColor` | `#3a3a48` | 开关关闭时的轨道颜色 |
+| `borderColor` | `#4a4a5a` | 轨道边框颜色 |
+
+### 默认尺寸
+
+开关默认为 **16×9 像素**（轨道），内部有 7×7 滑动旋钮。可通过 `style.width` / `style.height` 自定义。
+
+### 使用示例
+
+```tsx
+function Settings() {
+  const [darkMode, setDarkMode] = useState(false);
+  const [notifications, setNotifications] = useState(true);
+
+  return (
+    <Panel style={{ flexDirection: 'column', gap: 8, padding: 8 }}>
+      <Text style={{ fontSize: 1 }}>设置</Text>
+      <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+        <Text>深色模式</Text>
+        <Switch value={darkMode} onChange={setDarkMode} />
+      </Box>
+      <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+        <Text>通知</Text>
+        <Switch value={notifications} onChange={setNotifications} />
+      </Box>
+    </Panel>
+  );
+}
+```

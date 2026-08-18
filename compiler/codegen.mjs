@@ -24,6 +24,7 @@ const HOST_FACTORIES = new Map([
   ['button', '__button'], ['Button', '__button'],
   ['scroll', '__scroll'], ['Scroll', '__scroll'],
   ['input', '__input'], ['Input', '__input'],
+  ['switch', '__switch'], ['Switch', '__switch'],
 ]);
 
 export class CodegenError extends Error {}
@@ -943,7 +944,7 @@ export class Codegen {
     }
     if (/^[a-z]/.test(tag)) {
       throw new CodegenError(
-        `unknown intrinsic element <${tag}/> (known: Box/Panel/Text/Button/Scroll/Input)`);
+        `unknown intrinsic element <${tag}/> (known: Box/Panel/Text/Button/Scroll/Input/Switch)`);
     }
     if (!this.components.has(tag)) {
       throw new CodegenError(`<${tag}/> is used but no component function '${tag}' is defined`);
