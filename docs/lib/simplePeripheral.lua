@@ -122,6 +122,8 @@ simplePeripheral — 用 schema 描述设备所需接口, 通过 side 绑定实�
 ---@field name string 设备名
 ---@field interfaces InterfaceSpec[] 接口定义列表
 ---@field _byName { [string]: InterfaceSpec } 接口名索引(内部使用)
+---@field validate fun(self: SimplePeripheralSchema, bindings: Bindings): string[]? 校验绑定是否满足 schema
+---@field attach fun(self: SimplePeripheralSchema, bindings: Bindings): SimplePeripheralDevice 绑定各接口到实际外设, 校验失败报错
 
 --- 绑定完成后的设备对象。
 ---@class SimplePeripheralDevice
