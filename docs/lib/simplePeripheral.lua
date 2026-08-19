@@ -203,30 +203,30 @@ end
 ---@param seenNames { [string]: boolean } 已见过的接口名
 local function checkInterface(iface, index, seenNames)
     if type(iface) ~= "table" then
-        fail("第 %d 个接口定义不是表", index)
+        fail("interface definition #%d is not a table", index)
     end
     local name = iface.name
     if type(name) ~= "string" or name == "" then
-        fail("第 %d 个接口定义缺少非空的 name 字段", index)
+        fail("interface definition #%d is missing a non-empty 'name' field", index)
     end
     if seenNames[name] then
-        fail("接口名 '%s' 重复定义", name)
+        fail("duplicate interface name '%s'", name)
     end
     seenNames[name] = true
 
     if iface.kind == "peripheral" then
         if type(iface.type) ~= "string" or iface.type == "" then
-            fail("外设接口 '%s' 需要 type 字段(如 \"modem\")", name)
+            fail("peripheral interface '%s' requires a 'type' field (e.g. \"modem\")", name)
         end
     elseif iface.kind == "redstone" then
         if iface.direction ~= "input" and iface.direction ~= "output" then
-            fail("红石接口 '%s' 的 direction 必须是 \"input\" 或 \"output\", 实际是 %s", name, tostring(iface.direction))
+            fail("redstone interface '%s' direction must be \"input\" or \"output\", got %s", name, tostring(iface.direction))
         end
         if iface.signal ~= "binary" and iface.signal ~= "analogue" and iface.signal ~= "bundled" then
-            fail("红石接口 '%s' 的 signal 必须是 \"binary\"、\"analogue\" 或 \"bundled\", 实际是 %s", name, tostring(iface.signal))
+            fail("redstone interface '%s' signal must be \"binary\", \"analogue\", or \"bundled\", got %s", name, tostring(iface.signal))
         end
     else
-        fail("接口 '%s' 的 kind 必须是 \"peripheral\" 或 \"redstone\", 实际是 %s", name, tostring(iface.kind))
+        fail("interface '%s' kind must be \"peripheral\" or \"redstone\", got %s", name, tostring(iface.kind))
     end
 end
 
@@ -244,10 +244,10 @@ end
 ---@return SimplePeripheralSchema
 function simplePeripheral.defineSchema(name, interfaces)
     if type(name) ~= "string" or name == "" then
-        fail("defineSchema 需要一个非空设备名")
+        fail("defineSchema requires a non-empty device name")
     end
     if type(interfaces) ~= "table" or #interfaces == 0 then
-        fail("defineSchema 需要至少一个接口定义")
+        fail("defineSchema requires at least one interface definition")
     end
     local seenNames = {}
     for index, iface in ipairs(interfaces) do
@@ -278,17 +278,17 @@ end
 ---@return string[]? 错误信息列表, 全部通过时为 nil
 function SimplePeripheralSchema:validate(bindings)
     if type(peripheral) ~= "table" then
-        return { "当前环境没有 peripheral API(本库仅支持 CC: Tweaked)" }
+        return { "current environment has no peripheral API (this library only supports CC: Tweaked)" }
     end
     local errors = {}
     if type(bindings) ~= "table" then
-        return { "bindings 必须是一个表(接口名 -> side 或 { side = ..., color = ... })" }
+        return { "bindings must be a table (interface name -> side or { side = ..., color = ... })" }
     end
 
     -- 1) 未知接口名
     for boundName in pairs(bindings) do
         if not self._byName[boundName] then
-            table.insert(errors, ("未知接口名 '%s'(schema 中没有这个接口)"):format(tostring(boundName)))
+            table.insert(errors, ("unknown interface name '%s' (not in schema)"):format(tostring(boundName)))
         end
     end
 
@@ -296,63 +296,63 @@ function SimplePeripheralSchema:validate(bindings)
     for _, iface in ipairs(self.interfaces) do
         local binding = bindings[iface.name]
         if binding == nil then
-            table.insert(errors, ("接口 '%s' 缺少绑定"):format(iface.name))
+            table.insert(errors, ("interface '%s' is missing a binding"):format(iface.name))
         elseif iface.kind == "peripheral" then
             -- 外设接口: 绑定必须是合法 side, 且外设存在、类型完全一致
             if type(binding) ~= "string" or not SIDES[binding] then
-                table.insert(errors, ("接口 '%s' 的绑定 '%s' 不是合法 side(必须是 top/bottom/left/right/front/back)"):format(iface.name, tostring(binding)))
+                table.insert(errors, ("interface '%s' binding '%s' is not a valid side (must be top/bottom/left/right/front/back)"):format(iface.name, tostring(binding)))
             else
                 if not peripheral.isPresent(binding) then
-                    table.insert(errors, ("外设接口 '%s': side '%s' 上没有外设"):format(iface.name, binding))
+                    table.insert(errors, ("peripheral interface '%s': no peripheral on side '%s'"):format(iface.name, binding))
                 else
                     local actual = peripheral.getType(binding)
                     if actual ~= iface.type then
-                        table.insert(errors, ("外设接口 '%s' 需要类型 '%s' 的外设, 但 side '%s' 上是 %s"):format(iface.name, iface.type, binding, tostring(actual)))
+                        table.insert(errors, ("peripheral interface '%s' requires type '%s', but side '%s' has %s"):format(iface.name, iface.type, binding, tostring(actual)))
                     end
                 end
             end
         elseif iface.kind == "redstone" and iface.signal == "binary" and type(binding) == "table" and not isRelayBinding(binding) then
             -- binary 接口绑定为 bundled 通道: { side = ..., color = ... }
             if type(binding.side) ~= "string" or not SIDES[binding.side] then
-                table.insert(errors, ("接口 '%s' 的 side '%s' 非法(必须是 top/bottom/left/right/front/back)"):format(iface.name, tostring(binding.side)))
+                table.insert(errors, ("interface '%s' side '%s' is invalid (must be top/bottom/left/right/front/back)"):format(iface.name, tostring(binding.side)))
             end
             if not isSingleColour(binding.color) then
-                table.insert(errors, ("接口 '%s' 的 color 必须是 colours 表中的单一颜色(如 colours.red), 实际是 %s"):format(iface.name, tostring(binding.color)))
+                table.insert(errors, ("interface '%s' color must be a single colour from the colours table (e.g. colours.red), got %s"):format(iface.name, tostring(binding.color)))
             end
         elseif iface.kind == "redstone" and iface.signal == "binary" and isRelayBinding(binding) then
             -- binary 接口绑定到 relay: { relay = "...", side = "..." } 或 { relay = "...", side = "...", color = ... }
             if not peripheral.isPresent(binding.relay) then
-                table.insert(errors, ("relay 绑定 '%s': 外设 '%s' 不存在"):format(iface.name, binding.relay))
+                table.insert(errors, ("relay binding '%s': peripheral '%s' not present"):format(iface.name, binding.relay))
             elseif peripheral.getType(binding.relay) ~= "redstone_relay" then
-                table.insert(errors, ("relay 绑定 '%s': 外设 '%s' 类型是 '%s', 需要 'redstone_relay'"):format(iface.name, binding.relay, tostring(peripheral.getType(binding.relay))))
+                table.insert(errors, ("relay binding '%s': peripheral '%s' is type '%s', expected 'redstone_relay'"):format(iface.name, binding.relay, tostring(peripheral.getType(binding.relay))))
             end
             if binding.color ~= nil and not isSingleColour(binding.color) then
-                table.insert(errors, ("relay 绑定 '%s' 的 color 必须是 colours 表中的单一颜色, 实际是 %s"):format(iface.name, tostring(binding.color)))
+                table.insert(errors, ("relay binding '%s' color must be a single colour from the colours table, got %s"):format(iface.name, tostring(binding.color)))
             end
         elseif iface.kind == "redstone" and type(binding) == "table" and not isRelayBinding(binding) then
             -- analogue / bundled 不接受通道绑定
             if iface.signal == "analogue" then
-                table.insert(errors, ("analogue 接口 '%s' 只能绑定普通 side(模拟量无法走 bundled 通道)"):format(iface.name))
+                table.insert(errors, ("analogue interface '%s' can only bind to a plain side (analogue cannot use bundled channels)"):format(iface.name))
             else
-                table.insert(errors, ("bundled 接口 '%s' 的绑定直接给 side 字符串即可(color 由上层通过 setBundledOutput/getBundledInput 控制)"):format(iface.name))
+                table.insert(errors, ("bundled interface '%s' binding should just be a side string (color is controlled via setBundledOutput/getBundledInput)"):format(iface.name))
             end
         elseif iface.kind == "redstone" and isRelayBinding(binding) then
             -- analogue/bundled 接口绑定到 relay
             if not peripheral.isPresent(binding.relay) then
-                table.insert(errors, ("relay 绑定 '%s': 外设 '%s' 不存在"):format(iface.name, binding.relay))
+                table.insert(errors, ("relay binding '%s': peripheral '%s' not present"):format(iface.name, binding.relay))
             elseif peripheral.getType(binding.relay) ~= "redstone_relay" then
-                table.insert(errors, ("relay 绑定 '%s': 外设 '%s' 类型是 '%s', 需要 'redstone_relay'"):format(iface.name, binding.relay, tostring(peripheral.getType(binding.relay))))
+                table.insert(errors, ("relay binding '%s': peripheral '%s' is type '%s', expected 'redstone_relay'"):format(iface.name, binding.relay, tostring(peripheral.getType(binding.relay))))
             end
             if iface.signal == "bundled" then
                 -- bundled 信号的 relay 绑定只绑 side, 不需要 color
                 if binding.color ~= nil then
-                    table.insert(errors, ("bundled relay 绑定 '%s' 不需要 color(color 由上层通过 setBundledOutput/getBundledInput 控制)"):format(iface.name))
+                    table.insert(errors, ("bundled relay binding '%s' does not need a color (color is controlled via setBundledOutput/getBundledInput)"):format(iface.name))
                 end
             end
         else
             -- 普通 side 绑定(binary/analogue 真实红石, 或 bundled 接口)
             if type(binding) ~= "string" or not SIDES[binding] then
-                table.insert(errors, ("接口 '%s' 的绑定 '%s' 不是合法 side(必须是 top/bottom/left/right/front/back)"):format(iface.name, tostring(binding)))
+                table.insert(errors, ("interface '%s' binding '%s' is not a valid side (must be top/bottom/left/right/front/back)"):format(iface.name, tostring(binding)))
             end
         end
     end
@@ -400,13 +400,13 @@ function SimplePeripheralSchema:validate(bindings)
         end
 
         if peripheralCount > 1 then
-            table.insert(errors, ("side '%s' 被 %d 个外设接口复用(一个 side 最多挂一个外设)"):format(side, peripheralCount))
+            table.insert(errors, ("side '%s' is shared by %d peripheral interfaces (each side can have at most one peripheral)"):format(side, peripheralCount))
         end
         -- 普通红石域: 全 input 或恰好一个 output
         if plainInput > 0 and plainOutput > 0 then
-            table.insert(errors, ("side '%s' 的普通红石通道方向冲突: input+output 混用会自反馈(必须全 input 或恰好一个 output)"):format(side))
+            table.insert(errors, ("side '%s' plain redstone channel direction conflict: input+output mixed causes feedback (must be all input or exactly one output)"):format(side))
         elseif plainOutput > 1 then
-            table.insert(errors, ("side '%s' 的普通红石通道有 %d 个输出接口(每侧最多一个 output)"):format(side, plainOutput))
+            table.insert(errors, ("side '%s' has %d plain redstone output interfaces (at most one output per side)"):format(side, plainOutput))
         end
 
         -- bundled 域分析
@@ -430,23 +430,23 @@ function SimplePeripheralSchema:validate(bindings)
             end
         end
         if bw > 1 then
-            table.insert(errors, ("side '%s' 有 %d 个 bundled 输出接口(bundled 输出独占整根电缆, 每侧最多一个)"):format(side, bw))
+            table.insert(errors, ("side '%s' has %d bundled output interfaces (bundled output takes the entire cable, at most one per side)"):format(side, bw))
         elseif bw == 1 then
             if br + cw + cr > 0 then
-                table.insert(errors, ("side '%s' 的 bundled 输出独占该侧整根电缆, 不能与该侧其他 bundled 接口(含 binary 通道)共存"):format(side))
+                table.insert(errors, ("side '%s' bundled output takes the entire cable and cannot coexist with other bundled interfaces (including binary channels) on the same side"):format(side))
             end
         elseif br > 0 then
             if cw > 0 then
-                table.insert(errors, ("side '%s' 有 bundled 输入(读整根电缆)又有通道输出, 会读到自己写入的通道; 该侧 bundled 域只能全输入"):format(side))
+                table.insert(errors, ("side '%s' has bundled input (reads entire cable) and channel output, would read back own output; bundled domain on this side must be input-only"):format(side))
             end
         else
             -- 纯 binary 通道接口: 按颜色通道检查
             for color, count in pairs(channelOutputs) do
                 if count > 1 then
-                    table.insert(errors, ("side '%s' 的颜色通道 %s 有 %d 个输出接口(每个颜色通道最多一个 output)"):format(side, tostring(color), count))
+                    table.insert(errors, ("side '%s' colour channel %s has %d output interfaces (at most one output per colour channel)"):format(side, tostring(color), count))
                 end
                 if channelInputs[color] then
-                    table.insert(errors, ("side '%s' 的颜色通道 %s 方向冲突: input+output 混用会自反馈(该通道必须全 input 或恰好一个 output)"):format(side, tostring(color)))
+                    table.insert(errors, ("side '%s' colour channel %s direction conflict: input+output mixed causes feedback (must be all input or exactly one output)"):format(side, tostring(color)))
                 end
             end
         end
@@ -465,7 +465,7 @@ end
 function SimplePeripheralSchema:attach(bindings)
     local errors = self:validate(bindings)
     if errors then
-        fail("绑定校验失败:\n  - %s", table.concat(errors, "\n  - "))
+        fail("binding validation failed:\n  - %s", table.concat(errors, "\n  - "))
     end
 
     local device = {
@@ -523,7 +523,7 @@ end
 function SimplePeripheralDevice:getSide(name)
     local side = self.sides[name]
     if side == nil then
-        fail("未知接口名 '%s'", tostring(name))
+        fail("unknown interface name '%s'", tostring(name))
     end
     return side
 end
@@ -535,10 +535,10 @@ end
 function SimplePeripheralDevice:getPeripheral(name)
     local iface = self.schema._byName[name]
     if iface == nil then
-        fail("未知接口名 '%s'", tostring(name))
+        fail("unknown interface name '%s'", tostring(name))
     end
     if iface.kind ~= "peripheral" then
-        fail("接口 '%s' 不是外设接口, 请用 getInput/setOutput 或 bundled 原始接口访问", name)
+        fail("interface '%s' is not a peripheral interface, use getInput/setOutput or bundled raw APIs instead", name)
     end
     return self.wrapped[name]
 end
@@ -551,16 +551,16 @@ end
 function SimplePeripheralDevice:getInput(name)
     local iface = self.schema._byName[name]
     if iface == nil then
-        fail("未知接口名 '%s'", tostring(name))
+        fail("unknown interface name '%s'", tostring(name))
     end
     if iface.kind ~= "redstone" then
-        fail("接口 '%s' 不是红石接口, 请用 getPeripheral 访问", name)
+        fail("interface '%s' is not a redstone interface, use getPeripheral instead", name)
     end
     if iface.signal == "bundled" then
-        fail("bundled 接口 '%s' 请用 getBundledInput/testBundledInput 控制整根电缆", name)
+        fail("bundled interface '%s', use getBundledInput/testBundledInput to control the entire cable", name)
     end
     if iface.direction ~= "input" then
-        fail("接口 '%s' 是输出接口, 不能 getInput", name)
+        fail("interface '%s' is an output interface, cannot call getInput", name)
     end
     local side = self.sides[name]
     local rs = self.relays[name] or redstone
@@ -582,16 +582,16 @@ end
 function SimplePeripheralDevice:setOutput(name, value)
     local iface = self.schema._byName[name]
     if iface == nil then
-        fail("未知接口名 '%s'", tostring(name))
+        fail("unknown interface name '%s'", tostring(name))
     end
     if iface.kind ~= "redstone" then
-        fail("接口 '%s' 不是红石接口", name)
+        fail("interface '%s' is not a redstone interface", name)
     end
     if iface.signal == "bundled" then
-        fail("bundled 接口 '%s' 请用 setBundledOutput 控制整根电缆", name)
+        fail("bundled interface '%s', use setBundledOutput to control the entire cable", name)
     end
     if iface.direction ~= "output" then
-        fail("接口 '%s' 是输入接口, 不能 setOutput", name)
+        fail("interface '%s' is an input interface, cannot call setOutput", name)
     end
     local side = self.sides[name]
     local rs = self.relays[name] or redstone
@@ -604,7 +604,7 @@ function SimplePeripheralDevice:setOutput(name, value)
         end
     else -- analogue
         if type(value) ~= "number" then
-            fail("模拟输出接口 '%s' 需要 0-15 的数值, 实际是 %s", name, tostring(value))
+            fail("analogue output interface '%s' requires a value of 0-15, got %s", name, tostring(value))
         end
         local v = math.floor(value)
         if v < 0 then v = 0 elseif v > 15 then v = 15 end
@@ -622,17 +622,17 @@ end
 local function checkBundled(device, name, methodName, requiredDirection)
     local iface = device.schema._byName[name]
     if iface == nil then
-        return nil, ("未知接口名 '%s'"):format(tostring(name))
+        return nil, ("unknown interface name '%s'"):format(tostring(name))
     end
     if iface.kind ~= "redstone" then
-        return nil, ("接口 '%s' 不是红石接口"):format(name)
+        return nil, ("interface '%s' is not a redstone interface"):format(name)
     end
     if iface.signal ~= "bundled" then
-        return nil, ("接口 '%s' 不是 bundled 接口(请用 getInput/setOutput)"):format(name)
+        return nil, ("interface '%s' is not a bundled interface (use getInput/setOutput)"):format(name)
     end
     if iface.direction ~= requiredDirection then
-        local dirWord = requiredDirection == "input" and "输出" or "输入"
-        return nil, ("接口 '%s' 是%s接口, 不能调用 %s"):format(name, dirWord, methodName)
+        local dirWord = requiredDirection == "input" and "output" or "input"
+        return nil, ("interface '%s' is an %s interface, cannot call %s"):format(name, dirWord, methodName)
     end
     return iface, nil
 end

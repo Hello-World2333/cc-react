@@ -66,7 +66,7 @@ end
 local function clickButton()
   return function()
     local b = t.findButton(t.uiMod.getTree(), "确认")
-    if not b then error("button '确认' not found") end
+    if not b then error("button '确认' not found in UI tree") end
     return { "tm_monitor_touch", "mon_0", b.x + math.floor(b.w / 2), b.y + math.floor(b.h / 2), false }
   end
 end
