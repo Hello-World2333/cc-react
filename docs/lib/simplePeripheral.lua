@@ -16,7 +16,7 @@ simplePeripheral — 用 schema 描述设备所需接口, 通过 side 绑定实�
         { name = "bus",     kind = "redstone", direction = "output", signal = "bundled" },  -- 整根 bundled 电缆(原始接口控制)
     })
 
-    -- 2) attach: 用 side 填实际位置, 校验失败会报错退出
+    -- 2) attach: 绑定各接口到实际外设地址或红石 side, 校验失败会报错退出
     local device = schema:attach {
         modem   = "top",
         power   = "left",
@@ -51,7 +51,7 @@ simplePeripheral — 用 schema 描述设备所需接口, 通过 side 绑定实�
       - 有 bundled 输入(读整根电缆)时不允许任何通道输出, 否则会读到自己写入的通道;
       - 只有 binary 通道接口时按颜色通道检查(每色至多一个 output, 同色不允许 input+output, 不同颜色独立)。
     两个域互相独立, 且外设接口可与红石接口共享 side。
-  * 绑定只接受六个 side(top/bottom/left/right/front/back), 不支持有线网络上的命名外设(如 "monitor_0")。
+  * 外设接口绑定可以是六个 side(top/bottom/left/right/front/back), 也可以是有线 modem 上的任意外设名(如 "monitor_0"、"modem_1")。
   * **relay 绑定**: kind="redstone" 的接口还可绑定到 redstone_relay 外设的某个面,
     格式为 { relay = "redstone_relay_0", side = "front" }, binary 时可附加 color 走 bundled 通道。
     relay 绑定的红石读写自动通过 relay 外设的 API 路由, 对上层完全透明。
@@ -81,11 +81,12 @@ simplePeripheral — 用 schema 描述设备所需接口, 通过 side 绑定实�
 ---@field getName fun(self: Peripheral): string 外设的名字(通常是 side, 如 "top")
 ---@field getType fun(self: Peripheral): string 外设类型(如 "modem")
 
---- 外设接口定义: 需要某侧存在类型与 `type` 完全一致的外设。
+--- 外设接口定义: 需要某处存在类型与 `type` 完全一致的外设。
+--- 绑定可以是 side(top/bottom/left/right/front/back), 也可以是有线 modem 上的外设名(如 "monitor_0")。
 ---@class PeripheralInterfaceSpec
 ---@field name string 接口名(schema 内唯一)
 ---@field kind "peripheral"
----@field type string 要求的外设类型, attach 时用 peripheral.getType(side) 与之完全一致
+---@field type string 要求的外设类型, attach 时用 peripheral.getType(addr) 与之完全一致
 
 --- 红石接口定义: 用 方向 + 信号类型 描述, 实际位置在 attach 时绑定。
 --- 注意: bundled 接口不再有 color 字段(color 概念只出现在 binary 接口的 attach 绑定里)。
@@ -109,8 +110,9 @@ simplePeripheral — 用 schema 描述设备所需接口, 通过 side 绑定实�
 ---@field side Side relay 上的面
 ---@field color? ColourMask binary 信号走 bundled 通道时指定颜色(analogue/bundled 不需要)
 
---- 任一接口的绑定: 普通接口为 side 字符串; binary 接口还可以是 { side = ..., color = ... } 或 relay 绑定。
----@alias InterfaceBinding Side|ChannelBinding|RelayBinding
+--- 任一接口的绑定: 外设接口为任意非空字符串(side 或 wired modem 上的外设名); 红石普通 side 绑定为 Side 字符串;
+--- binary 接口还可以是 { side = ..., color = ... } 或 relay 绑定。
+---@alias InterfaceBinding Side|string|ChannelBinding|RelayBinding
 
 --- attach 时传入的绑定表: 接口名 -> 绑定。
 ---@alias Bindings { [string]: InterfaceBinding }
@@ -125,7 +127,7 @@ simplePeripheral — 用 schema 描述设备所需接口, 通过 side 绑定实�
 ---@class SimplePeripheralDevice
 ---@field name string 设备名
 ---@field schema SimplePeripheralSchema 来源 schema
----@field sides { [string]: Side } 各接口绑定的 side
+---@field sides { [string]: Side|string } 各接口绑定的 side 或外设地址(peripheral 接口可为 wired modem 上的外设名)
 ---@field colors { [string]: ColourMask } 绑定为 bundled 通道的 binary 接口的颜色(仅此类接口有)
 ---@field wrapped { [string]: Peripheral } 外设接口的 wrapped 外设(仅 kind == "peripheral" 的接口)
 ---@field relays { [string]: Peripheral } relay 绑定的 wrapped redstone_relay 外设
@@ -234,7 +236,7 @@ end
 
 --- 定义一个设备接口 schema。
 --- 接口定义形态:
----   { name = "...", kind = "peripheral", type = "modem" }                 -- 需要类型完全一致的外设
+---   { name = "...", kind = "peripheral", type = "modem" }                 -- 需要类型完全一致的外设(side 或 wired modem 上的外设名)
 ---   { name = "...", kind = "redstone", direction = "input|output", signal = "binary|analogue|bundled" }
 ---   -- binary: 抽象布尔, attach 时可绑普通 side 或 bundled 通道 { side, color }
 ---   -- analogue: 模拟强度(0-15), 只能绑普通 side
@@ -268,8 +270,7 @@ end
 --- 校验一份绑定是否满足 schema, 返回错误信息列表; 全部通过时返回 nil。
 --- 校验内容:
 ---   * 每个接口都有绑定, 且不存在多余的未知接口名
----   * side 必须是 top/bottom/left/right/front/back 之一
----   * 外设接口: 该侧必须存在外设, 且类型与 schema 完全一致
+---   * 外设接口: 绑定为任意非空字符串(side 或 wired modem 上的外设名), 该处必须存在外设, 且类型与 schema 完全一致
 ---   * binary 接口可绑为 bundled 通道 { side = ..., color = ... }, color 必须是 colours 单一颜色
 ---   * analogue/bundled 接口只能绑普通 side(bundled 不再有 color, 由上层用原始接口控制)
 ---   * 同侧冲突按域检查(规则见文件头"设计要点")
@@ -298,16 +299,16 @@ function SimplePeripheralSchema:validate(bindings)
         if binding == nil then
             table.insert(errors, ("interface '%s' is missing a binding"):format(iface.name))
         elseif iface.kind == "peripheral" then
-            -- 外设接口: 绑定必须是合法 side, 且外设存在、类型完全一致
-            if type(binding) ~= "string" or not SIDES[binding] then
-                table.insert(errors, ("interface '%s' binding '%s' is not a valid side (must be top/bottom/left/right/front/back)"):format(iface.name, tostring(binding)))
+            -- 外设接口: 绑定必须是非空字符串(可以是 side 或 wired modem 上的外设名), 且外设存在、类型完全一致
+            if type(binding) ~= "string" or binding == "" then
+                table.insert(errors, ("interface '%s' binding '%s' is not a valid peripheral address (must be a non-empty string, e.g. \"top\" or \"monitor_0\")"):format(iface.name, tostring(binding)))
             else
                 if not peripheral.isPresent(binding) then
-                    table.insert(errors, ("peripheral interface '%s': no peripheral on side '%s'"):format(iface.name, binding))
+                    table.insert(errors, ("peripheral interface '%s': no peripheral at '%s'"):format(iface.name, binding))
                 else
                     local actual = peripheral.getType(binding)
                     if actual ~= iface.type then
-                        table.insert(errors, ("peripheral interface '%s' requires type '%s', but side '%s' has %s"):format(iface.name, iface.type, binding, tostring(actual)))
+                        table.insert(errors, ("peripheral interface '%s' requires type '%s', but '%s' has %s"):format(iface.name, iface.type, binding, tostring(actual)))
                     end
                 end
             end
@@ -516,10 +517,10 @@ local function getRedstoneSource(device, name)
     return redstone, device.sides[name]
 end
 
---- 返回某接口绑定的 side。
+--- 返回某接口绑定的 side 或外设地址(peripheral 接口可返回 wired modem 上的外设名)。
 ---@param self SimplePeripheralDevice
 ---@param name string 接口名
----@return Side
+---@return Side|string
 function SimplePeripheralDevice:getSide(name)
     local side = self.sides[name]
     if side == nil then
