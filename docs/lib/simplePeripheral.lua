@@ -134,6 +134,14 @@ simplePeripheral — 用 schema 描述设备所需接口, 通过 side 绑定实�
 ---@field wrapped { [string]: Peripheral } 外设接口的 wrapped 外设(仅 kind == "peripheral" 的接口)
 ---@field relays { [string]: Peripheral } relay 绑定的 wrapped redstone_relay 外设
 ---@field relaySides { [string]: Side } relay 绑定的 relay 上的面
+---@field getSide fun(self: SimplePeripheralDevice, name: string): Side|string 返回接口绑定的 side 或外设地址
+---@field getPeripheral fun(self: SimplePeripheralDevice, name: string): Peripheral 获取外设接口的 wrapped 对象
+---@field getInput fun(self: SimplePeripheralDevice, name: string): boolean|number 读取输入型 binary/analogue 接口信号
+---@field setOutput fun(self: SimplePeripheralDevice, name: string, value: boolean|number) 写入输出型 binary/analogue 接口信号
+---@field getBundledInput fun(self: SimplePeripheralDevice, name: string): ColourMask 读取 bundled 输入接口的整根电缆掩码
+---@field testBundledInput fun(self: SimplePeripheralDevice, name: string, mask: ColourMask): boolean 测试 bundled 输入接口的某个颜色通道是否开
+---@field getBundledOutput fun(self: SimplePeripheralDevice, name: string): ColourMask 读取 bundled 输出接口当前写出的掩码
+---@field setBundledOutput fun(self: SimplePeripheralDevice, name: string, mask?: ColourMask) 写入 bundled 输出接口的整根电缆掩码
 
 ---@class simplePeripheral
 local simplePeripheral = {}
