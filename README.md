@@ -35,6 +35,7 @@ npm run test:all   # typecheck + build + test
 | [chinese-rendering.md](docs/chinese-rendering.md) | 中文渲染与自定义字体 |
 | [showcase.md](docs/showcase.md) | 演示应用说明 |
 | [troubleshooting.md](docs/troubleshooting.md) | 故障排查与已知限制 |
+| [mobile-data.md](docs/mobile-data.md) | 移动数据（基站切换）接入 |
 
 ## 相关资源
 
